@@ -79,50 +79,6 @@ public class Commands implements CommandExecutor {
                 sendHelpPage(sender, page);
                 return true;
 
-            case "kakchuchangelog":
-            case "kakchuchanges":
-            case "kpcl":
-                if (!sender.hasPermission("kakchuplugin.kakchuchangelog")) {
-                    sender.sendMessage("§cYou do not have permission to use this command.");
-                    return true;
-                }
-                sendMessage(sender,
-                        "versions labeled as X weren't uploaded to the server and were skipped",
-                        "§6--------ChangeLog--------",
-                        "§a§l§n2.0.0 - §7* Added Alerts, Automatic Restarts, /help lines 8-11",
-                        "§a§l§n2.0.1 - §7* Alerts Bugfix #1",
-                        "§a§l§n2.0.2 - §7* Alerts Bugfix #2",
-                        "§a§l§n2.0.3 - §7* Alerts Bugfix #3",
-                        "§a§l§n2.1.0 - §7* Added /kakchu changelog & aliases, fixed /help line 8 color, added Configurable Pings",
-                        "§a§l§n2.1.1 - §7* Fixed config.yml instructions, typo in 2.1.0 changelog, fixed changelog not working",
-                        "§a§l§n2.1.2 - §7* Fixed config.yml instructions #2, changed config.yml defaults",
-                        "§a§l§n2.1.3 - §7* Fixed Changelog not working #2, made command registration automatic",
-                        "§a§l§n2.1.4 - §7* Fixed Changelog not working #3 due to permissions, compacted changelog",
-                        "§a§l§n2.2.0 - §7* Added 30min 5sec 4sec 3sec 2sec 1sec countdown to restarter, added restarter start delay, check interval, schedule, message texts, sounds to config. added sfx. alerts changes. updated pom.yml",
-                        "§a§l§n2.3.0 - §7* Added clickable /help and /help pages, fixed restarter sound bug, added /kakchutime",
-                        "§a§l§n2.3.1 - §7* Improved kakchutime command, improved help command",
-                        "§a§l§n2.3.2X - §7* Fixed console errors in help, added /uptime command",
-                        "§a§l§n2.3.3X - §7* Optimized /help line packing, updated changelog",
-                        "§a§l§n2.3.4X - §7* Fixed permissions typo, improved console fallbacks",
-                        "§a§l§n2.4.0 - §7* improved kakchutime and help",
-                        "§a§l§n2.4.1 - §7* help hotfix",
-                        "§a§l§n2.4.2 - §7* uptime and alerts hotfix",
-                        "§a§l§n2.4.3 - §7* restarter bugfix",
-                        "§a§l§n2.4.4 - §7* alerts crash fix",
-                        "§a§l§n2.4.5X - §7* restarter bugfix",
-                        "§a§l§n2.4.6 - §7* restarter bugfix",
-                        "§a§l§n2.4.7 - §7* added /report to help list, chat placeholder integration",
-                        "§a§l§n2.4.8X - §7*Uptime tracker bugfix",
-                        "§a§l§n2.4.9 - §7* /version command changed to kversion",
-                        "§a§l§n2.5.0 - §7*map link can now be configured, alerts error fix",
-                        "§a§l§n2.5.1 - §7*map url config path fix",
-                        "§a§l§n2.5.2 - §7*1.21.11 update",
-                        "§a§l§n2.5.3 - §7*alerts ignore list added, help command list is now configureable.",
-                        "§a§l§n2.5.4 - §7*Alert loop and alerts ignore bugfix attempt.",
-                        "§6--------ChangeLog--------"
-                );
-                return true;
-
             case "kakchuversion":
             case "kversion":
             case "kpversion":

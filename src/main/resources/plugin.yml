@@ -45,9 +45,6 @@ permissions:
   kakchuplugin.kakchuversion:
     description: Allows usage of /kakchuversion command
     default: true
-  kakchuplugin.kakchuchangelog:
-    description: Allows usage of /kakchuchangelog command
-    default: true
   kakchuplugin.uptime:
     description: Allows usage of /uptime command
     default: true
