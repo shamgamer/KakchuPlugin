@@ -93,7 +93,7 @@ public class Commands implements CommandExecutor {
                         "§7Built on: §f" + buildTime,
                         "§7Developed by: §bshamgamer"
                 );
-                return true;
+                return true; // TODO make this send under /version kakchu instead of a custom command.
 
             default:
                 return false;
