@@ -1,0 +1,55 @@
+name: Kakchu
+version: ${project.version}
+main: win.kakchuserver.Manager
+api-version: 1.21
+
+commands:
+  map:
+    description: Links to the server's web world map
+    usage: /map
+    aliases: [servermap, worldmap]
+    permission: kakchuplugin.map
+    permission-message: You do not have permission to use this command.
+  help:
+    description: Shows commands players can use
+    usage: /help
+    aliases: [commands, assistance]
+    permission: kakchuplugin.help
+    permission-message: You do not have permission to use this command.
+  kakchuversion:
+    description: Shows plugin version info
+    usage: /kakchuversion
+    aliases: [kversion, kpversion]
+    permission: kakchuplugin.kakchuversion
+    permission-message: You do not have permission to use this command.
+  kakchuchangelog:
+    description: Shows plugin changelog
+    usage: /kakchuchangelog
+    aliases: [kakchuchanges, kpcl]
+    permission: kakchuplugin.kakchuchangelog
+    permission-message: You do not have permission to use this command.
+  uptime:
+    description: Shows server uptime statistics (day/week/month/year/all-time)
+    usage: /uptime
+    aliases: [servertime, kakchutime]
+    permission: kakchuplugin.uptime
+    permission-message: You do not have permission to use this command.
+
+permissions:
+  kakchuplugin.map:
+    description: Allows usage of /map command
+    default: true
+  kakchuplugin.help:
+    description: Allows usage of /help command
+    default: true
+  kakchuplugin.kakchuversion:
+    description: Allows usage of /kakchuversion command
+    default: true
+  kakchuplugin.kakchuchangelog:
+    description: Allows usage of /kakchuchangelog command
+    default: true
+  kakchuplugin.uptime:
+    description: Allows usage of /uptime command
+    default: true
+
+build-time: ${build.time}

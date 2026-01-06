@@ -1,0 +1,152 @@
+discord:
+  # token: the bot token for the bot that will be sending the alerts.
+  token: ""
+  # channel: the channel ID for where you want the alerts to be sent.
+  channel: ""
+  # ping: default mention, can be changed to @everyone @here, <@RoleID>, <@UserID> etc.
+  ping: "@everyone"
+
+links:
+  map-url: "https://map.kakchuserver.win"
+
+uptime:
+  flush-interval-seconds: 1
+  retention-days: -1
+  merge-gap-ms: 1000
+
+restarter: # All values are in server ticks, minecraft usually runs at 20 ticks per second.
+  start-delay-ticks: 432000   # default 6 hours (432000 ticks)
+  interval-ticks: 10          # default 0.5 seconds (10 ticks)
+  schedule:
+    sunday: [ ]
+    monday:
+      - "19:00"
+    tuesday: [ ]
+    wednesday: [ ]
+    thursday: [ ]
+    friday:
+      - "09:00"
+    saturday: [ ]
+
+  # Message must be text inside "". sound must be a Bukkit enum name not mojang format.
+  # Valid Bukkit sound names can be found in the org.bukkit.Sound enum.
+  warnings:
+    1h:
+      message: "&e⚠ Server restarting in 1 hour!"
+      sound: "BLOCK_NOTE_BLOCK_PLING"
+    30m:
+      message: "&e⚠ Server restarting in 30 minutes!"
+      sound: "BLOCK_NOTE_BLOCK_PLING"
+    10m:
+      message: "&6⚠ Server restarting in 10 minutes!"
+      sound: "BLOCK_NOTE_BLOCK_BELL"
+    5m:
+      message: "&c⚠ Server restarting in 5 minutes!"
+      sound: "BLOCK_NOTE_BLOCK_CHIME"
+    1m:
+      message: "&4⚠ Server restarting in 1 minute!"
+      sound: "BLOCK_NOTE_BLOCK_BASS"
+    30s:
+      message: "&4⚠ Restarting in 30 seconds!"
+      sound: "BLOCK_NOTE_BLOCK_BASEDRUM"
+    10s:
+      message: "&4⚠ Restarting in 10 seconds!"
+      sound: "BLOCK_NOTE_BLOCK_BASEDRUM"
+    5s:
+      message: "&4⚠ Restarting in 5..."
+      sound: "BLOCK_NOTE_BLOCK_HAT"
+    4s:
+      message: "&4⚠ Restarting in 4..."
+      sound: "BLOCK_NOTE_BLOCK_HAT"
+    3s:
+      message: "&4⚠ Restarting in 3..."
+      sound: "BLOCK_NOTE_BLOCK_HAT"
+    2s:
+      message: "&4⚠ Restarting in 2..."
+      sound: "BLOCK_NOTE_BLOCK_HAT"
+    1s:
+      message: "&4⚠ Restarting in 1..."
+      sound: "BLOCK_NOTE_BLOCK_HAT"
+
+  restart:
+    command: "restart"
+    message: "&c⚠ Server is restarting now!"
+    sound: "BLOCK_ANVIL_LAND"
+
+alerts:
+  # ignore: a list of substrings; any alert whose formatted message contains one of these will not be sent.
+  ignore:
+    - "Cannot reply to ClientboundHelloPacket without profile and access token"
+
+help:
+  # How many chat lines to show per page
+  lines-per-page: 3
+
+  # Maximum visible characters allowed per chat line when packing commands.
+  max-line-chars: 45
+
+  # Maximum number of commands to show on a single chat line
+  max-per-line: 5
+
+  # Force a second item onto a line even if it exceeds max-line-chars
+  force-second-item: true
+
+  entries:
+    - command: "/rules"
+      description: "Show the server rules"
+    - command: "/map"
+      description: "Open the world map"
+    - command: "/discord"
+      description: "Join our Discord server"
+    - command: "/tpa"
+      description: "Request to teleport to another player"
+    - command: "/tpahere"
+      description: "Request another player to teleport to you"
+    - command: "/tpyes"
+      description: "Accept a tpa request"
+    - command: "/tpno"
+      description: "Decline a tpa request"
+    - command: "/home"
+      description: "Teleport to your home"
+    - command: "/sethome"
+      description: "Set your home location"
+    - command: "/delhome"
+      description: "Delete a home"
+    - command: "/graves list"
+      description: "List your graves"
+    - command: "/hat"
+      description: "Wear the item in your hand as a hat (requires cacti rank)"
+    - command: "/afk"
+      description: "Toggle AFK status"
+    - command: "/msg <player>"
+      description: "Send a private message"
+    - command: "/r"
+      description: "Reply to last private message"
+    - command: "/dynmap hide"
+      description: "Hide from dynmap"
+    - command: "/dynmap show"
+      description: "Show on dynmap"
+    - command: "/sit"
+      description: "Sit down"
+    - command: "/crawl"
+      description: "Crawl on the ground"
+    - command: "/lay"
+      description: "Lay down"
+    - command: "/spin"
+      description: "Spin around (requires cacti rank)"
+    - command: "/bellyflop"
+      description: "Belly flop!"
+    - command: "/uptime"
+      description: "Show server uptime statistics"
+    - command: "[inv]"
+      description: "sends your inventory in chat"
+    - command: "[i]"
+      description: "sends your held item in chat"
+    - command: "[e]"
+      description: "sends your ender chest in chat"
+    - command: "[pos]"
+      description: "sends your cords in chat"
+    - command: "[ping]"
+      description: "sends your ping in chat"
+    - command: "[gametime]"
+      description: "sends the current game time in chat"
