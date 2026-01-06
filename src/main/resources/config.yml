@@ -3,11 +3,21 @@ discord:
   token: ""
   # channel: the channel ID for where you want the alerts to be sent.
   channel: ""
-  # ping: default mention, can be changed to @everyone @here, <@RoleID>, <@UserID> etc... or just normal text prefix to alert.
+  # ping: if empty defualts to @everyone. can be changed to @everyone @here, <@RoleID>, <@UserID> etc... or just normal text prefix to alert.
   ping: "@everyone" # TODO make the alert prefix fully editable.
 
 links:
-  map-url: "https://map.kakchuserver.win" # TODO make the /map text fully editable.
+  map-url: "https://YourMapWebsiteLink.com"
+
+update-checker:
+  enabled: true
+  project-id: "w6F3AvdX"
+  loaders: ["purpur", "paper"]
+  include-prerelease: true # false will ignore beta and alpha versions
+  interval-hours: 12
+  notify-console: true # Notify in console after server start + at interval hours
+  notify-ops: true # Notify in player's chat at interval hours
+  notify-ops-on-login: true # Notify in player's chat at login for ops
 
 uptime:
   flush-interval-seconds: 1

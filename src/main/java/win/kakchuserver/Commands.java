@@ -79,22 +79,6 @@ public class Commands implements CommandExecutor {
                 sendHelpPage(sender, page);
                 return true;
 
-            case "kakchuversion":
-            case "kversion":
-            case "kpversion":
-                if (!sender.hasPermission("kakchuplugin.kakchuversion")) {
-                    sender.sendMessage("§cYou do not have permission to use this command.");
-                    return true;
-                }
-                String version = Manager.getInstance().getDescription().getVersion();
-                String buildTime = getBuildTime();
-                sendMessage(sender,
-                        "§bKakchuPlugin §fversion §a" + version,
-                        "§7Built on: §f" + buildTime,
-                        "§7Developed by: §bshamgamer"
-                );
-                return true; // TODO make this send under /version kakchu instead of a custom command.
-
             default:
                 return false;
         }
@@ -266,24 +250,30 @@ public class Commands implements CommandExecutor {
     }
 
     private List<HelpEntry> buildHelpEntries() {
-        List<HelpEntry> list = new ArrayList<>();
-        List<Map<?, ?>> rawEntries = Manager.getInstance().getConfig().getMapList("help.entries");
-        if (rawEntries == null || rawEntries.isEmpty()) {
-            return list; // nothing configured
-        }
+        var config = Manager.getInstance().getConfig();
+
+        List<Map<?, ?>> rawEntries = config.getMapList("help.entries");
+        if (rawEntries.isEmpty()) return List.of();
+
+        List<HelpEntry> list = new ArrayList<>(rawEntries.size());
 
         for (Map<?, ?> raw : rawEntries) {
             if (raw == null) continue;
 
-            Object cmdObj = raw.get("command");
+            Object cmdObj  = raw.get("command");
             Object descObj = raw.get("description");
 
-            String cmd = (cmdObj == null) ? "" : String.valueOf(cmdObj).trim();
-            String desc = (descObj == null) ? "" : String.valueOf(descObj).trim();
+            String cmd  = (cmdObj == null) ? "" : cmdObj.toString();
+            String desc = (descObj == null) ? "" : descObj.toString();
 
-            if (cmd.isEmpty()) continue; // command is required
-            list.add(new HelpEntry(cmd, desc));
+            cmd  = cmd.stripLeading();
+            desc = desc.trim();
+
+            if (!cmd.isEmpty()) {
+                list.add(new HelpEntry(cmd, desc));
+            }
         }
+
         return list;
     }
 

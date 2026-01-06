@@ -13,6 +13,27 @@ public class Manager extends JavaPlugin {
     private Alerts alertsHandler;
     private UptimeTracker tracker;
 
+    private volatile String updateAvailableMessage;
+    private volatile String updateAvailableVersion;
+
+    public String getUpdateAvailableMessage() {
+        return updateAvailableMessage;
+    }
+
+    public String getUpdateAvailableVersion() {
+        return updateAvailableVersion;
+    }
+
+    public void setUpdateAvailable(String version, String message) {
+        this.updateAvailableVersion = version;
+        this.updateAvailableMessage = message;
+    }
+
+    public void clearUpdateAvailable() {
+        this.updateAvailableVersion = null;
+        this.updateAvailableMessage = null;
+    }
+
     @Override
     public void onEnable() {
         instance = this;
@@ -20,6 +41,13 @@ public class Manager extends JavaPlugin {
 
         // Ensure config exists before anything that reads it
         saveDefaultConfig();
+
+        if (getConfig().getBoolean("update-checker.enabled", true)) {
+            long hours = Math.max(1, getConfig().getLong("update-checker.interval-hours", 12));
+            long periodTicks = hours * 60L * 60L * 20L;
+            Bukkit.getScheduler().runTaskTimerAsynchronously(this, new UpdateChecker(this), 20L * 10L, periodTicks);
+            Bukkit.getPluginManager().registerEvents(new UpdateLoginNotifier(this), this);
+        }
 
         // === Uptime tracker ===
         try {

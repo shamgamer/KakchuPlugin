@@ -1,5 +1,8 @@
 name: Kakchu
 version: ${project.version}
+website: https://modrinth.com/project/w6F3AvdX
+authors: ["shamgamer"]
+description: "Build Time: ${build.time}"
 main: win.kakchuserver.Manager
 api-version: 1.21
 
@@ -16,18 +19,6 @@ commands:
     aliases: [commands, assistance]
     permission: kakchuplugin.help
     permission-message: You do not have permission to use this command.
-  kakchuversion:
-    description: Shows plugin version info
-    usage: /kakchuversion
-    aliases: [kversion, kpversion]
-    permission: kakchuplugin.kakchuversion
-    permission-message: You do not have permission to use this command.
-  kakchuchangelog:
-    description: Shows plugin changelog
-    usage: /kakchuchangelog
-    aliases: [kakchuchanges, kpcl]
-    permission: kakchuplugin.kakchuchangelog
-    permission-message: You do not have permission to use this command.
   uptime:
     description: Shows server uptime statistics (day/week/month/year/all-time)
     usage: /uptime
@@ -41,10 +32,6 @@ permissions:
     default: true
   kakchuplugin.help:
     description: Allows usage of /help command
-    default: true
-  kakchuplugin.kakchuversion:
-    description: Allows usage of /kakchuversion command
-    default: true
   kakchuplugin.uptime:
     description: Allows usage of /uptime command
     default: true
