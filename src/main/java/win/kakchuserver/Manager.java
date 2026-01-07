@@ -4,6 +4,8 @@ import org.bukkit.Bukkit;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -37,11 +39,16 @@ public class Manager extends JavaPlugin {
     @Override
     public void onEnable() {
         instance = this;
-        getLogger().info("Kakchu Plugin enabled!");
 
         // Ensure config exists before anything that reads it
         saveDefaultConfig();
 
+        // === Discord alerts (attach EARLY to avoid missing startup WARN/ERROR) ===
+        enableDiscordAlertsEarly();
+
+        getLogger().info("Kakchu Plugin enabled!");
+
+        // === Update checker ===
         if (getConfig().getBoolean("update-checker.enabled", true)) {
             long hours = Math.max(1, getConfig().getLong("update-checker.interval-hours", 12));
             long periodTicks = hours * 60L * 60L * 20L;
@@ -59,15 +66,15 @@ public class Manager extends JavaPlugin {
             tracker = null;
         }
 
-        // Auto-register all commands from plugin.yml.
-        var commands = getDescription().getCommands(); // this is non-null in the Bukkit API
-        if (commands != null && !commands.isEmpty()) {
+        // === Auto-register all commands from plugin.yml ===
+        @SuppressWarnings("deprecation") // Paper deprecates getDescription(), but it is still the simplest reliable way.
+        var commands = getDescription().getCommands();
+
+        if (!commands.isEmpty()) {
             for (String cmdName : commands.keySet()) {
                 if ("uptime".equalsIgnoreCase(cmdName) && tracker != null) {
-                    // Prefer the uptime command with live tracker
                     registerCommand(cmdName, new UptimeTracker.UptimeCommand(tracker));
                 } else {
-                    // Fallback/default handler — your existing Commands class
                     registerCommand(cmdName, new Commands());
                 }
             }
@@ -75,33 +82,8 @@ public class Manager extends JavaPlugin {
             getLogger().info("No commands found in plugin.yml to register.");
         }
 
-        // === Discord alerts ===
-        String token = getConfig().getString("discord.token", "");
-        String channelId = getConfig().getString("discord.channel", "");
-        String pingType = getConfig().getString("discord.ping", "@everyone");
-
-        if (token != null && channelId != null && !token.isEmpty() && !channelId.isEmpty()) {
-            // initialize Alerts off the main thread (network work)
-            Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-                try {
-                    alertsHandler = new Alerts(token, channelId, pingType);
-                    // On success, attach logging handler on main thread
-                    Bukkit.getScheduler().runTask(this, () -> {
-                        Logger rootLogger = Logger.getLogger("");
-                        rootLogger.addHandler(alertsHandler);
-                        getLogger().info("✅ Discord alerts enabled.");
-                    });
-                } catch (Exception e) {
-                    getLogger().log(Level.SEVERE, "❌ Failed to enable Discord alerts: " + e.getMessage(), e);
-                }
-            });
-        } else {
-            getLogger().warning("⚠️ Discord alert token/channel not set in config.yml.");
-        }
-
         // === Restarter scheduling ===
-        // NOTE: use keys under the top-level "restarter" section (not under "discord")
-        long startDelay = getConfig().getLong("restarter.start-delay-ticks", 432000L); // default 6 hours (432k ticks)
+        long startDelay = getConfig().getLong("restarter.start-delay-ticks", 432000L); // default 6 hours
         long interval = getConfig().getLong("restarter.interval-ticks", 10L);          // default 10 ticks (0.5s)
 
         if (startDelay < 0) {
@@ -126,6 +108,32 @@ public class Manager extends JavaPlugin {
         }
     }
 
+    private void enableDiscordAlertsEarly() {
+        String token = getConfig().getString("discord.token", "");
+        String channelId = getConfig().getString("discord.channel", "");
+        String pingType = getConfig().getString("discord.ping", "@everyone");
+
+        // matches config.yml: alerts.ignore
+        List<String> ignore = new ArrayList<>(getConfig().getStringList("alerts.ignore"));
+
+        if (token.isBlank() || channelId.isBlank()) {
+            getLogger().warning("⚠️ Discord alert token/channel not set in config.yml.");
+            return;
+        }
+
+        try {
+            // Constructor is non-blocking; it starts JDA init on its own thread.
+            alertsHandler = new Alerts(token.trim(), channelId.trim(), pingType, ignore);
+
+            Logger rootLogger = Logger.getLogger("");
+            rootLogger.addHandler(alertsHandler);
+
+            getLogger().info("✅ Discord alerts enabled.");
+        } catch (Exception e) {
+            getLogger().log(Level.SEVERE, "❌ Failed to enable Discord alerts: " + e.getMessage(), e);
+        }
+    }
+
     @Override
     public void onDisable() {
         if (tracker != null) {
@@ -142,10 +150,10 @@ public class Manager extends JavaPlugin {
             rootLogger.removeHandler(alertsHandler);
             try {
                 alertsHandler.close();
-            } catch (Exception e) {
-                // ignore
+            } catch (Exception ignored) {
             }
         }
+
         getLogger().info("Kakchu Plugin disabled!");
     }
 

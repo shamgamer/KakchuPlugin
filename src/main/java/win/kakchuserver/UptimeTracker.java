@@ -4,6 +4,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
@@ -12,6 +13,7 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -26,45 +28,57 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 
 /**
- * UptimeTracker - Robust implementation (single interval per run, periodic end updates, async atomic saves,
- * merge/trim, exact rolling window computation).
+ * UptimeTracker - hardened implementation:
+ * - Atomic writes only (tmp + move) + rolling backups
+ * - Recovery from tmp / backups if main file is missing/empty/invalid
+ * - Persist heartbeat (runningSince) together with interval end updates
+ * - Coalesced async saves (latest snapshot wins) to prevent backlog
 
- * Config keys (put in your plugin config.yml):
+ * Config keys:
  * uptime:
- *   flush-interval-seconds: 1      # how often to update last interval end (min 1)
- *   retention-days: 370            # how many days of intervals to keep; set -1 to keep forever
- *   merge-gap-ms: 1000             # merge intervals separated by <= this ms
-
- * Integration:
- *  - Create an instance in your plugin's onEnable():
- *      tracker = new UptimeTracker(this);
- *      tracker.start();
- *      this.getCommand("uptime").setExecutor(new UptimeTracker.UptimeCommand(tracker));
- *  - Call tracker.stop() from plugin's onDisable().
+ *   flush-interval-seconds: 1
+ *   retention-days: 370   # -1 = keep forever
+ *   merge-gap-ms: 1000
  */
 public class UptimeTracker {
     private final JavaPlugin plugin;
     private final File dataFile;
+
+    private final Path bak1;
+    private final Path bak2;
+    private final Path bak3;
+
     private YamlConfiguration cfg;
 
     // keys in the YAML
-    private static final String KEY_RUNNING_SINCE = "runningSince"; // epoch millis (for compatibility)
+    private static final String KEY_RUNNING_SINCE = "runningSince";        // heartbeat / lastSeen epoch millis
     private static final String KEY_ALLTIME_SINCE = "alltime.trackedSince"; // epoch millis
-    private static final String KEY_INTERVALS = "intervals"; // list of maps {start: <ms>, end: <ms>}
+    private static final String KEY_INTERVALS = "intervals";               // list of maps {start: <ms>, end: <ms>}
 
-    // runtime state
-    private volatile long runningSince = -1L; // epoch millis
+    // runtime state (last seen timestamp while running; -1 when stopped)
+    private volatile long lastSeenMs = -1L;
     private int flushTaskId = -1;
+    private final AtomicBoolean started = new AtomicBoolean(false);
+    private final AtomicBoolean closing = new AtomicBoolean(false);
 
-    // Single-threaded executor to serialize all async saves (prevents temp-file race)
+    // Single-threaded executor for async writes (coalesced)
     private final ExecutorService saveExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "Kakchu-UptimeSave");
         t.setDaemon(true);
         return t;
     });
+
+    // Coalescing saver state
+    private final AtomicBoolean saveScheduled = new AtomicBoolean(false);
+    private final AtomicLong saveSeq = new AtomicLong(0);
+    private final AtomicLong saveWrittenSeq = new AtomicLong(0);
+    private final AtomicReference<String> latestYaml = new AtomicReference<>("");
 
     // defaults (overridable via config)
     private static final int DEFAULT_FLUSH_SECONDS = 1;
@@ -75,6 +89,11 @@ public class UptimeTracker {
         this.plugin = plugin;
         this.dataFile = new File(plugin.getDataFolder(), "uptime.yml");
 
+        Path parent = plugin.getDataFolder().toPath();
+        this.bak1 = parent.resolve("uptime.yml.bak1");
+        this.bak2 = parent.resolve("uptime.yml.bak2");
+        this.bak3 = parent.resolve("uptime.yml.bak3");
+
         File dataDir = plugin.getDataFolder();
         if (!dataDir.exists()) {
             boolean ok = dataDir.mkdirs();
@@ -83,10 +102,65 @@ public class UptimeTracker {
             }
         }
 
-        // Cleanup any leftover temp files from previous runs (optional hygiene)
+        // If the main file is missing/empty, try to recover from a leftover tmp file first.
+        recoverFromTempIfNeeded();
+
+        // Cleanup old leftover temp files (hygiene).
         cleanupLeftoverTempFiles();
 
-        loadConfig();
+        loadConfigRobust();
+    }
+
+    /**
+     * If uptime.yml is missing or 0 bytes, try to recover from the newest uptime.yml.*.tmp in the same directory.
+     */
+    private void recoverFromTempIfNeeded() {
+        try {
+            Path parent = dataFile.toPath().getParent();
+            if (parent == null) return;
+
+            boolean mainMissingOrEmpty = !dataFile.exists() || Files.size(dataFile.toPath()) == 0;
+            if (!mainMissingOrEmpty) return;
+
+            List<Path> candidates = new ArrayList<>();
+            DirectoryStream.Filter<Path> filter = entry -> {
+                String name = entry.getFileName().toString();
+                return name.startsWith(dataFile.getName() + ".") && name.endsWith(".tmp");
+            };
+
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(parent, filter)) {
+                for (Path p : ds) candidates.add(p);
+            }
+
+            if (candidates.isEmpty()) return;
+
+            candidates.sort((a, b) -> {
+                try {
+                    return Long.compare(Files.getLastModifiedTime(b).toMillis(), Files.getLastModifiedTime(a).toMillis());
+                } catch (Exception e) {
+                    return 0;
+                }
+            });
+
+            for (Path tmp : candidates) {
+                try {
+                    YamlConfiguration test = new YamlConfiguration();
+                    test.load(tmp.toFile());
+                    if (isConfigSane(test)) {
+                        // Move tmp into place as the main file
+                        try {
+                            Files.move(tmp, dataFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                        } catch (java.nio.file.AtomicMoveNotSupportedException amnse) {
+                            Files.move(tmp, dataFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                        }
+                        plugin.getLogger().warning("[Uptime] Recovered uptime.yml from temp file: " + tmp.getFileName());
+                        return;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     /**
@@ -96,119 +170,155 @@ public class UptimeTracker {
         try {
             Path parent = dataFile.toPath().getParent();
             if (parent == null) return;
+
             DirectoryStream.Filter<Path> filter = entry -> {
                 String name = entry.getFileName().toString();
                 return name.startsWith(dataFile.getName() + ".") && name.endsWith(".tmp");
             };
+
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(parent, filter)) {
                 for (Path p : ds) {
                     try {
                         BasicFileAttributes attrs = Files.readAttributes(p, BasicFileAttributes.class);
                         long ageMs = System.currentTimeMillis() - attrs.lastModifiedTime().toMillis();
-                        // delete files older than 1 minute (safe threshold)
-                        if (ageMs > Duration.ofMinutes(1).toMillis()) {
+                        // delete files older than 5 minutes (more conservative)
+                        if (ageMs > Duration.ofMinutes(5).toMillis()) {
                             Files.deleteIfExists(p);
                         }
-                    } catch (Exception ignored) {}
+                    } catch (Exception ignored) {
+                    }
                 }
             }
-        } catch (Exception ignored) {}
-    }
-
-    /**
-     * Load (or initialize) uptime.yml
-     */
-    private void loadConfig() {
-        if (dataFile.exists()) {
-            cfg = YamlConfiguration.loadConfiguration(dataFile);
-        } else {
-            cfg = new YamlConfiguration();
-            // initialize fields
-            cfg.set(KEY_INTERVALS, new ArrayList<Map<String, Object>>());
-            cfg.set(KEY_ALLTIME_SINCE, System.currentTimeMillis());
-            saveConfig(); // initial synchronous write
-        }
-
-        // ensure intervals exists and is a list
-        if (!cfg.contains(KEY_INTERVALS) || !(cfg.get(KEY_INTERVALS) instanceof List)) {
-            cfg.set(KEY_INTERVALS, new ArrayList<Map<String, Object>>());
-            saveConfig();
-        }
-
-        // ensure alltime.trackedSince exists
-        if (!cfg.contains(KEY_ALLTIME_SINCE)) {
-            cfg.set(KEY_ALLTIME_SINCE, System.currentTimeMillis());
-            saveConfig();
+        } catch (Exception ignored) {
         }
     }
 
     /**
-     * Synchronous save (used on shutdown / fallback)
+     * Robust load:
+     * - Load main file; if invalid, try restore from backups; if still invalid, quarantine corrupt file and start fresh.
+     * - Normalize/repair intervals and persist if changes are needed.
      */
-    private synchronized void saveConfig() {
-        try {
-            cfg.save(dataFile);
-        } catch (IOException e) {
-            plugin.getLogger().log(Level.WARNING, "Failed to save uptime data", e);
-        }
-    }
-
-    /**
-     * Low-level helper: write the YAML snapshot to a tmp file and move into place.
-     * This is used both from async task and as a synchronous fallback on shutdown.
-     */
-    private void writeAtomicYamlSnapshot(String yamlDump) throws IOException {
+    private void loadConfigRobust() {
         // Ensure parent directory exists
-        Path parent = dataFile.toPath().getParent();
-        if (parent == null) {
-            // fallback to plugin data folder path; this should not normally be null, but be defensive
-            parent = plugin.getDataFolder().toPath();
-        }
-        Files.createDirectories(parent);
-
-        // Create a unique temporary file in the same directory (avoids races between writers)
-        // e.g. uptime.yml.123456.tmp
-        Path tmp = Files.createTempFile(parent, dataFile.getName() + ".", ".tmp");
-
-        // Write temp file
-        try (BufferedWriter out = new BufferedWriter(
-                new OutputStreamWriter(Files.newOutputStream(tmp,
-                        StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING),
-                        StandardCharsets.UTF_8))) {
-            out.write(yamlDump);
-            out.flush();
-        } catch (IOException writeEx) {
-            // cleanup temp if write failed
-            try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
-            throw writeEx;
-        }
-
-        // Defensive existence check
-        if (!Files.exists(tmp)) {
-            throw new IOException("Temporary file not present after write: " + tmp);
-        }
-
-        // Try atomic move; fall back to replace if not supported
         try {
-            Files.move(tmp, dataFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (java.nio.file.AtomicMoveNotSupportedException amnse) {
-            Files.move(tmp, dataFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        } catch (java.nio.file.NoSuchFileException nsfe) {
-            // tmp missing at move time -> report
-            throw new IOException("Temporary file missing during move: " + tmp, nsfe);
-        } catch (Exception ex) {
-            // ensure we don't leak temp files on unexpected failure
-            try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
-            throw ex;
+            Files.createDirectories(plugin.getDataFolder().toPath());
+        } catch (Exception ignored) {}
+
+        if (!dataFile.exists()) {
+            cfg = new YamlConfiguration();
+            cfg.set(KEY_INTERVALS, new ArrayList<Map<String, Object>>());
+            cfg.set(KEY_ALLTIME_SINCE, System.currentTimeMillis());
+            saveConfigAtomicSync();
+            return;
+        }
+
+        YamlConfiguration loaded = tryLoadYaml(dataFile);
+        if (!isConfigSane(loaded)) {
+            plugin.getLogger().warning("[Uptime] uptime.yml is missing/invalid. Attempting restore from backups...");
+            if (restoreFromBackups()) {
+                loaded = tryLoadYaml(dataFile);
+            }
+        }
+
+        if (!isConfigSane(loaded)) {
+            // Quarantine corrupt file so we don't destroy evidence, then start fresh.
+            quarantineCorruptMain();
+            cfg = new YamlConfiguration();
+            cfg.set(KEY_INTERVALS, new ArrayList<Map<String, Object>>());
+            cfg.set(KEY_ALLTIME_SINCE, System.currentTimeMillis());
+            saveConfigAtomicSync();
+            return;
+        }
+
+        cfg = loaded;
+
+        // Repair/normalize (merge, trim, fix bad entries)
+        boolean changed = repairNormalizeInMemory();
+        if (changed) {
+            saveConfigAtomicSync();
+        }
+    }
+
+    private YamlConfiguration tryLoadYaml(File file) {
+        try {
+            YamlConfiguration yc = new YamlConfiguration();
+            yc.load(file);
+            return yc;
+        } catch (IOException | InvalidConfigurationException e) {
+            plugin.getLogger().log(Level.WARNING, "[Uptime] Failed to load YAML: " + file.getName(), e);
+            return null;
+        } catch (Exception e) {
+            plugin.getLogger().log(Level.WARNING, "[Uptime] Unexpected error loading YAML: " + file.getName(), e);
+            return null;
+        }
+    }
+
+    private boolean isConfigSane(YamlConfiguration yc) {
+        if (yc == null) return false;
+
+        Object raw = yc.get(KEY_INTERVALS);
+        if (raw != null && !(raw instanceof List<?>)) return false;
+
+        List<?> list = yc.getList(KEY_INTERVALS);
+        if (list != null) {
+            for (Object el : list) {
+                if (!(el instanceof Map<?, ?>)) return false;
+            }
+        }
+
+        // trackedSince should exist and be a plausible epoch ms (allow 0 if older files)
+        long since = yc.getLong(KEY_ALLTIME_SINCE, 0L);
+        return since >= 0;
+    }
+
+    private void quarantineCorruptMain() {
+        try {
+            Path parent = dataFile.toPath().getParent();
+            if (parent == null) return;
+
+            String ts = String.valueOf(System.currentTimeMillis());
+            Path quarantined = parent.resolve("uptime.yml.corrupt-" + ts);
+            Files.move(dataFile.toPath(), quarantined, StandardCopyOption.REPLACE_EXISTING);
+            plugin.getLogger().warning("[Uptime] Quarantined corrupt uptime.yml to: " + quarantined.getFileName());
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean restoreFromBackups() {
+        List<Path> backups = Arrays.asList(bak1, bak2, bak3);
+        for (Path b : backups) {
+            try {
+                if (!Files.exists(b) || Files.size(b) == 0) continue;
+                YamlConfiguration test = tryLoadYaml(b.toFile());
+                if (isConfigSane(test)) {
+                    // Copy backup into main using temp+move (atomic-ish)
+                    String content = Files.readString(b, StandardCharsets.UTF_8);
+                    writeAtomicYamlSnapshot(content);
+                    plugin.getLogger().warning("[Uptime] Restored uptime.yml from backup: " + b.getFileName());
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
+    }
+
+    // ------------------------- Saving (atomic only) -------------------------
+
+    private synchronized void saveConfigAtomicSync() {
+        try {
+            String yaml = cfg.saveToString();
+            writeAtomicYamlSnapshot(yaml);
+        } catch (Exception e) {
+            plugin.getLogger().log(Level.WARNING, "[Uptime] Failed to create/save YAML snapshot synchronously", e);
         }
     }
 
     /**
-     * Async atomic save: snapshot YAML string under lock, then write the bytes asynchronously to a temp file
-     * and move into place atomically where supported.
-
-     * IMPORTANT: If the plugin is already disabled (shutdown path) we avoid scheduling any Bukkit tasks
-     * and do a synchronous write instead.
+     * Coalesced async save:
+     * - snapshot cfg under lock
+     * - if closing/disabled -> sync atomic write
+     * - else schedule one writer that always writes the latest snapshot
      */
     private void saveConfigAsync() {
         final String yamlDump;
@@ -216,113 +326,239 @@ public class UptimeTracker {
             try {
                 yamlDump = cfg.saveToString();
             } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "Failed to create YAML snapshot for async save", e);
+                plugin.getLogger().log(Level.WARNING, "[Uptime] Failed to create YAML snapshot for async save", e);
                 return;
             }
         }
 
-        // If plugin is disabled, perform synchronous write to avoid scheduler calls during shutdown.
-        if (!plugin.isEnabled()) {
+        if (closing.get() || !plugin.isEnabled()) {
             try {
                 writeAtomicYamlSnapshot(yamlDump);
             } catch (IOException io) {
-                plugin.getLogger().log(Level.WARNING, "Failed to write uptime.yml synchronously during shutdown", io);
+                plugin.getLogger().log(Level.WARNING, "[Uptime] Failed to write uptime.yml synchronously (closing/disabled)", io);
             }
             return;
         }
 
-        // Submit to our serializing executor. If it's rejected, fallback to sync write.
+        latestYaml.set(yamlDump);
+        saveSeq.incrementAndGet();
+
+        if (!saveScheduled.compareAndSet(false, true)) {
+            return; // a writer is already scheduled/running; it will pick up the latestYaml
+        }
+
         try {
-            saveExecutor.submit(() -> {
-                try {
-                    writeAtomicYamlSnapshot(yamlDump);
-                } catch (IOException io) {
-                    plugin.getLogger().log(Level.WARNING, "Failed to write uptime.yml asynchronously", io);
-                }
-            });
+            saveExecutor.submit(this::runCoalescedWriter);
         } catch (RejectedExecutionException ex) {
-            plugin.getLogger().log(Level.FINER, "Save executor rejected async save (shutting down?), falling back to sync save.", ex);
+            saveScheduled.set(false);
+            plugin.getLogger().log(Level.FINER, "[Uptime] Save executor rejected async save; falling back to sync write.", ex);
             try {
                 writeAtomicYamlSnapshot(yamlDump);
             } catch (IOException io) {
-                plugin.getLogger().log(Level.WARNING, "Failed to write uptime.yml synchronously after executor rejection", io);
+                plugin.getLogger().log(Level.WARNING, "[Uptime] Failed to write uptime.yml synchronously after rejection", io);
             }
+        }
+    }
+
+    private void runCoalescedWriter() {
+        try {
+            while (true) {
+                long target = saveSeq.get();
+                String yaml = latestYaml.get();
+
+                try {
+                    writeAtomicYamlSnapshot(yaml);
+                } catch (IOException io) {
+                    plugin.getLogger().log(Level.WARNING, "[Uptime] Failed to write uptime.yml asynchronously", io);
+                }
+
+                saveWrittenSeq.set(target);
+
+                // If no newer snapshot requested during our write, we're done.
+                if (saveSeq.get() == target) break;
+            }
+        } finally {
+            saveScheduled.set(false);
+
+            // Handle race: a new save could have been requested after we set saveScheduled=false.
+            if (!closing.get() && plugin.isEnabled() && saveWrittenSeq.get() != saveSeq.get()) {
+                if (saveScheduled.compareAndSet(false, true)) {
+                    try {
+                        saveExecutor.submit(this::runCoalescedWriter);
+                    } catch (RejectedExecutionException ignored) {
+                        saveScheduled.set(false);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Write the YAML snapshot to a tmp file and move into place (atomic where supported).
+     * Also rotates backups (best-effort) before replacing the main file.
+     */
+    private void writeAtomicYamlSnapshot(String yamlDump) throws IOException {
+        Path parent = dataFile.toPath().getParent();
+        if (parent == null) parent = plugin.getDataFolder().toPath();
+        Files.createDirectories(parent);
+
+        // Create a unique temp file in same directory.
+        Path tmp = Files.createTempFile(parent, dataFile.getName() + ".", ".tmp");
+
+        // Write tmp (UTF-8) + force to disk.
+        try (BufferedWriter out = new BufferedWriter(
+                new OutputStreamWriter(
+                        Files.newOutputStream(tmp, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING),
+                        StandardCharsets.UTF_8))) {
+            out.write(yamlDump);
+            out.flush();
+        } catch (IOException writeEx) {
+            try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
+            throw writeEx;
+        }
+
+        // fsync temp file
+        try (FileChannel ch = FileChannel.open(tmp, StandardOpenOption.WRITE)) {
+            ch.force(true);
+        } catch (Exception ignored) {
+        }
+
+        if (!Files.exists(tmp) || Files.size(tmp) == 0) {
+            throw new IOException("Temporary file missing/empty after write: " + tmp);
+        }
+
+        // Rotate backups best-effort (do not fail the save if backups fail)
+        rotateBackupsBestEffort();
+
+        // Move into place
+        try {
+            Files.move(tmp, dataFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.nio.file.AtomicMoveNotSupportedException amnse) {
+            Files.move(tmp, dataFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception ex) {
+            try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
+            throw ex;
+        }
+    }
+
+    private void rotateBackupsBestEffort() {
+        try {
+            Path main = dataFile.toPath();
+            if (!Files.exists(main) || Files.size(main) == 0) return;
+
+            // bak3 <- bak2
+            try {
+                if (Files.exists(bak3)) Files.deleteIfExists(bak3);
+                if (Files.exists(bak2)) Files.move(bak2, bak3, StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception ignored) {}
+
+            // bak2 <- bak1
+            try {
+                if (Files.exists(bak2)) Files.deleteIfExists(bak2);
+                if (Files.exists(bak1)) Files.move(bak1, bak2, StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception ignored) {}
+
+            // bak1 <- main (copy)
+            try {
+                Files.copy(main, bak1, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+            } catch (Exception ignored) {}
+        } catch (Exception ignored) {
         }
     }
 
     // ------------------------- Interval helpers -------------------------
 
-    /**
-     * Get intervals as a mutable list of maps (each map contains "start" (Long) and "end" (Long)).
-     * This method performs a single unchecked cast from the raw map-list returned by the config API.
-     */
     @SuppressWarnings("unchecked")
     private synchronized List<Map<String, Object>> getIntervalsMutable() {
-        // YamlConfiguration#getMapList returns List<Map<?,?>>; cast once in a controlled place
         List<Map<String, Object>> list = (List<Map<String, Object>>) (List<?>) cfg.getMapList(KEY_INTERVALS);
-        // getMapList returns an empty list if not present, but defensively ensure a fresh mutable copy
         return new ArrayList<>(list);
     }
 
     /**
-     * Write back intervals into cfg (and perform trimming + merging) then async-save.
-     * This method must be called synchronized (it uses getIntervalsMutable which is synchronized).
+     * Normalize/repair intervals in cfg (in-memory) and return whether changes were applied.
      */
-    private synchronized void setIntervalsAndSave(List<Map<String, Object>> intervals) {
-        // normalize entries (ensure start/end are Long, remove malformed)
-        List<Interval> parsed = new ArrayList<>(intervals.size());
-        for (Map<String, Object> m : intervals) {
-            if (m == null) continue;
-            Object oStart = m.get("start");
-            Object oEnd = m.get("end");
-            try {
-                long s = oStart instanceof Number ? ((Number) oStart).longValue() : Long.parseLong(String.valueOf(oStart));
-                long e = oEnd instanceof Number ? ((Number) oEnd).longValue() : Long.parseLong(String.valueOf(oEnd));
-                if (e < s) e = s; // defensive
-                parsed.add(new Interval(s, e));
-            } catch (Exception ignored) {
-                // skip malformed entry
+    private synchronized boolean repairNormalizeInMemory() {
+        boolean changed = false;
+
+        if (!cfg.contains(KEY_INTERVALS) || !(cfg.get(KEY_INTERVALS) instanceof List)) {
+            cfg.set(KEY_INTERVALS, new ArrayList<Map<String, Object>>());
+            changed = true;
+        }
+
+        long now = System.currentTimeMillis();
+
+        // Parse intervals, drop malformed, normalize end>=start.
+        List<Map<String, Object>> raw = getIntervalsMutable();
+        List<Interval> parsed = new ArrayList<>(raw.size());
+        for (Map<String, Object> m : raw) {
+            if (m == null) { changed = true; continue; }
+            long s = toLong(m.get("start"));
+            long e = toLong(m.get("end"));
+            if (s < 0) { changed = true; continue; }
+            if (e < s) { e = s; changed = true; }
+            parsed.add(new Interval(s, e));
+        }
+
+        // Crash recovery using persisted heartbeat (runningSince)
+        // If server crashed, KEY_RUNNING_SINCE likely remains set. Ensure last interval end >= that heartbeat.
+        long heartbeat = cfg.getLong(KEY_RUNNING_SINCE, -1L);
+        if (heartbeat > 0 && heartbeat <= now && !parsed.isEmpty()) {
+            parsed.sort(Comparator.comparingLong(i -> i.start));
+            Interval last = parsed.getLast();
+            if (heartbeat >= last.start && heartbeat > last.end) {
+                last.end = heartbeat;
+                changed = true;
             }
         }
 
-        // perform merge + trim according to config
-        long now = System.currentTimeMillis();
+        // Merge + trim
         int retentionDays = getRetentionDays();
-
-        // Support sentinel: retentionDays < 0 => keep forever (don't trim by age)
         final long minKeepEnd;
         if (retentionDays < 0) {
-            // keep everything (no age-based trimming)
             minKeepEnd = Long.MIN_VALUE;
-            plugin.getLogger().finer("[Uptime] retention-days < 0 detected: infinite retention (no age trimming).");
         } else {
             long retentionMs = Duration.ofDays(Math.max(1, retentionDays)).toMillis();
             minKeepEnd = now - retentionMs;
         }
-
         long mergeGapMs = getMergeGapMs();
 
-        // sort by start
         parsed.sort(Comparator.comparingLong(i -> i.start));
-
-        // merge contiguous/close intervals and drop too-old intervals (unless minKeepEnd == Long.MIN_VALUE)
         List<Interval> out = new ArrayList<>();
         for (Interval iv : parsed) {
-            if (minKeepEnd != Long.MIN_VALUE && iv.end < minKeepEnd) continue; // too old entirely
+            if (minKeepEnd != Long.MIN_VALUE && iv.end < minKeepEnd) {
+                changed = true;
+                continue;
+            }
             if (out.isEmpty()) {
                 out.add(iv);
             } else {
-                Interval last = out.get(out.size() - 1);
+                Interval last = out.getLast();
                 if (iv.start <= last.end || iv.start <= last.end + mergeGapMs) {
-                    // overlap or small gap -> merge
-                    last.end = Math.max(last.end, iv.end);
+                    long newEnd = Math.max(last.end, iv.end);
+                    if (newEnd != last.end) changed = true;
+                    last.end = newEnd;
                 } else {
                     out.add(iv);
                 }
             }
         }
 
-        // convert back to list of maps
+        // Ensure trackedSince exists
+        if (!cfg.contains(KEY_ALLTIME_SINCE)) {
+            // Prefer the earliest interval start if available
+            long since = out.isEmpty() ? now : out.getFirst().start;
+            cfg.set(KEY_ALLTIME_SINCE, since);
+            changed = true;
+        } else {
+            long since = cfg.getLong(KEY_ALLTIME_SINCE, now);
+            if (since < 0 || since > now) {
+                long fixed = out.isEmpty() ? now : out.getFirst().start;
+                cfg.set(KEY_ALLTIME_SINCE, fixed);
+                changed = true;
+            }
+        }
+
+        // Write back normalized list
         List<Map<String, Object>> saveList = new ArrayList<>(out.size());
         for (Interval iv : out) {
             Map<String, Object> m = new HashMap<>();
@@ -331,114 +567,82 @@ public class UptimeTracker {
             saveList.add(m);
         }
 
-        cfg.set(KEY_INTERVALS, saveList);
-        // ensure trackedSince set
-        if (!cfg.contains(KEY_ALLTIME_SINCE)) {
-            cfg.set(KEY_ALLTIME_SINCE, now);
+        // Only set if different sizes or if we changed anything (simple + safe)
+        if (changed || saveList.size() != raw.size()) {
+            cfg.set(KEY_INTERVALS, saveList);
+            changed = true;
         }
-        // async-save snapshot (or sync if shutdown)
-        saveConfigAsync();
+
+        return changed;
     }
 
-    /**
-     * Append a new run interval (start,end). Will merge with previous if needed and trim old ones.
-     * Use this for starting or when you want to record a completed interval.
-     */
     private synchronized void appendInterval(long startMs, long endMs) {
         if (endMs < startMs) endMs = startMs;
 
         List<Map<String, Object>> intervals = getIntervalsMutable();
+        Map<String, Object> entry = new HashMap<>();
+        entry.put("start", startMs);
+        entry.put("end", endMs);
+        intervals.add(entry);
 
-        // convert to Interval objects for easier logic
-        List<Interval> parsed = new ArrayList<>();
-        for (Map<String, Object> m : intervals) {
-            if (m == null) continue;
-            Object oStart = m.get("start");
-            Object oEnd = m.get("end");
-            try {
-                long s = oStart instanceof Number ? ((Number) oStart).longValue() : Long.parseLong(String.valueOf(oStart));
-                long e = oEnd instanceof Number ? ((Number) oEnd).longValue() : Long.parseLong(String.valueOf(oEnd));
-                if (e < s) e = s;
-                parsed.add(new Interval(s, e));
-            } catch (Exception ignored) {
-            }
-        }
+        cfg.set(KEY_INTERVALS, intervals);
 
-        // add the new interval (merge logic will run in setIntervalsAndSave)
-        parsed.add(new Interval(startMs, endMs));
+        // Normalize/merge/trim after append (may or may not change anything beyond the append)
+        repairNormalizeInMemory();
 
-        // convert back to maps (we pass to setIntervalsAndSave which will sort/merge/trim)
-        List<Map<String, Object>> toSave = new ArrayList<>();
-        for (Interval iv : parsed) {
-            Map<String, Object> m = new HashMap<>();
-            m.put("start", iv.start);
-            m.put("end", iv.end);
-            toSave.add(m);
-        }
-
-        setIntervalsAndSave(toSave);
+        // Always save because the append itself changed the data
+        saveConfigAsync();
     }
 
     /**
-     * Update last interval's end to given time (used for periodic flush). If no interval exists, create one.
+     * Update last interval end in-memory (no save).
      */
-    private synchronized void updateLastIntervalEnd(long endMs) {
+    private synchronized void updateLastIntervalEndInMemory(long endMs) {
         List<Map<String, Object>> intervals = getIntervalsMutable();
         if (intervals.isEmpty()) {
-            // no existing interval -> append new
             Map<String, Object> entry = new HashMap<>();
             entry.put("start", endMs);
             entry.put("end", endMs);
             intervals.add(entry);
             cfg.set(KEY_INTERVALS, intervals);
-            saveConfigAsync();
             return;
         }
 
-        // update last map's end
-        Map<String, Object> last = intervals.get(intervals.size() - 1);
-        last.put("end", endMs);
-        cfg.set(KEY_INTERVALS, intervals);
-
-        // we save async but don't run merge/trim on every second-level update to avoid churn;
-        // merge/trim will be applied at appendInterval or periodically in setIntervalsAndSave when needed.
-        saveConfigAsync();
-    }
-
-    // ------------------------- Lifecycle: start / stop / periodic flush -------------------------
-
-    /**
-     * Start tracking: recovers unclosed previous interval, appends new run record, and schedules periodic flush.
-     */
-    public synchronized void start() {
-        long now = System.currentTimeMillis();
-
-        // ensure config trackedSince
-        if (!cfg.contains(KEY_ALLTIME_SINCE)) cfg.set(KEY_ALLTIME_SINCE, now);
-
-        // Recover previous unclosed interval if present
-        List<Map<String, Object>> intervals = getIntervalsMutable();
-        if (!intervals.isEmpty()) {
-            Map<String, Object> last = intervals.get(intervals.size() - 1);
-            long lastStart = toLong(last.get("start"));
-            long lastEnd = toLong(last.get("end"));
-
-            // If lastEnd < lastStart (or equals -1), treat it as unclosed/crash and finalize at 'now'
-            if (lastStart > 0 && (lastEnd < lastStart)) {
-                last.put("end", now);
-                cfg.set(KEY_INTERVALS, intervals);
-                saveConfigAsync();
-                plugin.getLogger().info("Recovered previous unclosed uptime interval; finalized at now.");
-            }
+        Map<String, Object> last = intervals.getLast();
+        if (last == null) {
+            Map<String, Object> entry = new HashMap<>();
+            entry.put("start", endMs);
+            entry.put("end", endMs);
+            intervals.add(entry);
+            cfg.set(KEY_INTERVALS, intervals);
+            return;
         }
 
-        // Append new interval for this run; initialize end = start (we'll update it periodically)
+        last.put("end", endMs);
+        cfg.set(KEY_INTERVALS, intervals);
+    }
+
+    // ------------------------- Lifecycle -------------------------
+
+    public synchronized void start() {
+        if (!started.compareAndSet(false, true)) return;
+        closing.set(false);
+
+        long now = System.currentTimeMillis();
+
+        // Repair/normalize on start (also applies crash recovery using persisted heartbeat).
+        boolean changed = repairNormalizeInMemory();
+        if (changed) saveConfigAsync();
+
+        // Append new interval for this run (end starts == start; will be extended by flushes).
         appendInterval(now, now);
-        runningSince = now;
-        cfg.set(KEY_RUNNING_SINCE, runningSince);
+
+        // Start heartbeat/lastSeen and persist it immediately.
+        lastSeenMs = now;
+        cfg.set(KEY_RUNNING_SINCE, lastSeenMs);
         saveConfigAsync();
 
-        // schedule periodic flush using configured interval (seconds)
+        // Schedule periodic flush
         int flushIntervalSeconds = getFlushIntervalSeconds();
         if (flushIntervalSeconds < 1) flushIntervalSeconds = 1;
         long ticks = 20L * flushIntervalSeconds;
@@ -447,10 +651,10 @@ public class UptimeTracker {
                 .scheduleSyncRepeatingTask(plugin, this::periodicFlush, ticks, ticks);
     }
 
-    /**
-     * Stop tracking: update last interval end, cancel task, sync-save (final).
-     */
     public synchronized void stop() {
+        if (!started.compareAndSet(true, false)) return;
+        closing.set(true);
+
         // cancel scheduled task if present
         if (flushTaskId != -1) {
             try {
@@ -461,66 +665,45 @@ public class UptimeTracker {
         }
 
         long now = System.currentTimeMillis();
-        // ensure last interval's end is the final end
-        // updateLastIntervalEnd calls saveConfigAsync; that method detects plugin.isEnabled() and will do sync save if needed
-        updateLastIntervalEnd(now);
-        runningSince = -1L;
+
+        // Finalize last interval end + clear heartbeat
+        updateLastIntervalEndInMemory(now);
+        lastSeenMs = -1L;
         cfg.set(KEY_RUNNING_SINCE, null);
 
-        // ensure merge/trim and schedule async saves for persistence
-        List<Map<String, Object>> intervals = getIntervalsMutable();
-        setIntervalsAndSave(intervals);
+        // Normalize/merge/trim one last time (in-memory)
+        repairNormalizeInMemory();
 
-        // Shutdown the saveExecutor and wait for pending writes to finish so they don't overwrite our final state.
+        // Final synchronous atomic save (no non-atomic saves)
+        saveConfigAtomicSync();
+
+        // Stop executor and prevent old snapshots from overwriting final state
         saveExecutor.shutdown();
         try {
             if (!saveExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                // if it didn't finish in time, force shutdown and perform a synchronous atomic write of the latest snapshot
                 saveExecutor.shutdownNow();
-                plugin.getLogger().finer("[Uptime] saveExecutor did not terminate in time; forcing shutdown and performing final synchronous save.");
-                try {
-                    final String yamlDump;
-                    synchronized (this) {
-                        yamlDump = cfg.saveToString();
-                    }
-                    writeAtomicYamlSnapshot(yamlDump);
-                } catch (IOException e) {
-                    plugin.getLogger().log(Level.WARNING, "Failed to perform final synchronous write of uptime.yml during shutdown", e);
-                }
-            } else {
-                // executor finished normally; for extra safety do one last synchronous save using cfg.save(file)
-                saveConfig();
             }
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             saveExecutor.shutdownNow();
-            try {
-                final String yamlDump;
-                synchronized (this) {
-                    yamlDump = cfg.saveToString();
-                }
-                writeAtomicYamlSnapshot(yamlDump);
-            } catch (IOException e) {
-                plugin.getLogger().log(Level.WARNING, "Failed to perform final synchronous write of uptime.yml after interrupted shutdown", e);
-            }
         }
     }
 
-    /**
-     * Periodic flush invoked on the main thread (scheduled). It simply updates last interval's end
-     * and triggers async persistence. This is intentionally cheap (no merging here).
-     */
     private synchronized void periodicFlush() {
-        if (runningSince <= 0) return;
+        if (lastSeenMs <= 0) return;
+
         long now = System.currentTimeMillis();
-        if (now <= runningSince) return;
-        updateLastIntervalEnd(now);
-        runningSince = now;
-        cfg.set(KEY_RUNNING_SINCE, runningSince);
-        // updateLastIntervalEnd already called async-save (or sync fallback if shutdown)
+        if (now <= lastSeenMs) return;
+
+        // Update interval end + heartbeat and save together.
+        updateLastIntervalEndInMemory(now);
+        lastSeenMs = now;
+        cfg.set(KEY_RUNNING_SINCE, lastSeenMs);
+
+        saveConfigAsync();
     }
 
-    // ------------------------- Querying / Formatting -------------------------
+    // ------------------------- Querying -------------------------
 
     private static String formatSeconds(long seconds) {
         long days = seconds / 86400;
@@ -534,9 +717,8 @@ public class UptimeTracker {
     }
 
     /**
-     * Returns a UptimeSummary for the requested period type.
-     * period: "day", "week", "month", "year", "all" (alltime)
-     * plus rolling windows: "24h", "7d", "30d", "365d"
+     * period: "day", "week", "month", "year", "all"
+     * rolling: "24h", "7d", "30d", "365d"
      */
     public synchronized UptimeSummary getSummary(String period) {
         long now = System.currentTimeMillis();
@@ -548,7 +730,6 @@ public class UptimeTracker {
         String label;
 
         switch (period.toLowerCase(Locale.ROOT)) {
-            // calendar aligned buckets -> compute by overlap with bucket start.now
             case "day": {
                 long bucketStart = nowZ.toLocalDate().atStartOfDay(zone).toInstant().toEpochMilli();
                 uptimeSeconds = computeOverlap(bucketStart, now);
@@ -591,7 +772,6 @@ public class UptimeTracker {
                 break;
             }
 
-            // rolling windows
             case "24h": {
                 long cutoff = now - Duration.ofHours(24).toMillis();
                 uptimeSeconds = computeOverlap(cutoff, now);
@@ -641,11 +821,11 @@ public class UptimeTracker {
     }
 
     /**
-     * Compute overlap seconds between [windowStartMs, nowMs) and stored intervals including current running.
-     * Assumes caller synchronizes.
+     * Compute overlap seconds between [windowStartMs, nowMs) and stored intervals + live time since last flush.
      */
     private long computeOverlap(long windowStartMs, long nowMs) {
         long total = 0L;
+
         List<Map<String, Object>> intervals = getIntervalsMutable();
         for (Map<String, Object> m : intervals) {
             if (m == null) continue;
@@ -653,6 +833,7 @@ public class UptimeTracker {
             long e = toLong(m.get("end"));
             if (s < 0) continue;
             if (e < s) e = s;
+
             long overlapStart = Math.max(s, windowStartMs);
             long overlapEnd = Math.min(e, nowMs);
             if (overlapStart < overlapEnd) {
@@ -660,10 +841,10 @@ public class UptimeTracker {
             }
         }
 
-        // also account for running interval if present and not fully captured above
-        long rs = runningSince;
-        if (rs > 0 && rs < nowMs) {
-            long overlapStart = Math.max(rs, windowStartMs);
+        // Add live uptime since last persisted end (lastSeenMs == last flush time).
+        long ls = lastSeenMs;
+        if (ls > 0 && ls < nowMs) {
+            long overlapStart = Math.max(ls, windowStartMs);
             if (overlapStart < nowMs) {
                 total += (nowMs - overlapStart) / 1000L;
             }
@@ -672,12 +853,8 @@ public class UptimeTracker {
         return total;
     }
 
-    // ------------------------- Utilities & small helpers -------------------------
+    // ------------------------- Utilities -------------------------
 
-    /**
-     * Convert a config value to long; returns -1 if unparsable or null.
-     * Single-arg helper so callers don't pass a literal fallback every time.
-     */
     private static long toLong(Object o) {
         if (o == null) return -1L;
         if (o instanceof Number) return ((Number) o).longValue();
@@ -696,7 +873,6 @@ public class UptimeTracker {
         }
     }
 
-    // Small helpers to avoid repeating the same literal parameters across the codebase
     private int getFlushIntervalSeconds() {
         return getConfigInt("uptime.flush-interval-seconds", DEFAULT_FLUSH_SECONDS);
     }
@@ -705,10 +881,6 @@ public class UptimeTracker {
         return getConfigInt("uptime.retention-days", DEFAULT_RETENTION_DAYS);
     }
 
-    /**
-     * Read merge-gap-ms from the "uptime" section directly to avoid repeated literal-parameter warnings.
-     * This avoids calling a helper with the identical literal path/fallback and silences IDE inspection warnings.
-     */
     private long getMergeGapMs() {
         try {
             ConfigurationSection uptime = plugin.getConfig().getConfigurationSection("uptime");
@@ -719,7 +891,6 @@ public class UptimeTracker {
         }
     }
 
-    // Simple interval holder for internal merging/trimming
     private static class Interval {
         long start;
         long end;
@@ -730,25 +901,12 @@ public class UptimeTracker {
         }
     }
 
-    // ------------------------- Uptime summary + command -------------------------
+    // ------------------------- Summary + command -------------------------
 
-    public static class UptimeSummary {
-        public final String label;
-        public final long uptimeSeconds;
-        public final long possibleSeconds;
-        public final double percent;
-        public final Instant trackedSince;
-
-        public UptimeSummary(String label, long uptimeSeconds, long possibleSeconds, double percent, Instant trackedSince) {
-            this.label = label;
-            this.uptimeSeconds = uptimeSeconds;
-            this.possibleSeconds = possibleSeconds;
-            this.percent = percent;
-            this.trackedSince = trackedSince;
-        }
+    public record UptimeSummary(String label, long uptimeSeconds, long possibleSeconds, double percent,
+                                Instant trackedSince) {
     }
 
-    // ------------------------- Command executor -------------------------
     public static class UptimeCommand implements CommandExecutor {
         private final UptimeTracker tracker;
 
@@ -783,7 +941,7 @@ public class UptimeTracker {
             if (period.equals("365") || period.equals("1y") || period.equals("past365") || period.equals("pastyear") || period.equals("1year")) period = "365d";
 
             if (period.equals("help")) {
-                sender.sendMessage("/uptime [day|week|month|year|all|24h|7d|30d|365d] - show uptime; no arg = show lots of ranges");
+                sender.sendMessage("/uptime [day|week|month|year|all|24h|7d|30d|365d]");
                 return true;
             }
 

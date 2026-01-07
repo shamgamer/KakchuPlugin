@@ -17,13 +17,26 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Queue;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+
+// Log4j2 (server-provided on Paper; add as PROVIDED in pom if your IDE can’t resolve)
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Appender;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configuration;
+import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.apache.logging.log4j.core.config.Property;
 
 public class Alerts extends Handler {
     private static final Logger LOGGER = Logger.getLogger(Alerts.class.getName());
@@ -39,16 +52,16 @@ public class Alerts extends Handler {
 
     // Configurable behavior
     private static final int DISCORD_MAX_LEN = 1999;                // Discord message size limit
-    private static final long SENDER_INTERVAL_MS = 1000L;          // how often the sender runs
-    private static final int SENDER_BATCH_SIZE = 3;                // how many messages to attempt per interval
-    private static final int MAX_QUEUE_SIZE = 5000;                // hard cap for queued messages
-    private static final long CHANNEL_CACHE_TTL_MS = 30_000L;      // how long to cache resolved channel
-    private static final long CHANNEL_MISSING_WARN_COOLDOWN_MS = 60_000L; // cooldown for local warning when channel missing
-    private static final int MAX_SEND_ATTEMPTS = 5;                // how many times to retry a failed send (non-network failures)
+    private static final long SENDER_INTERVAL_MS = 1000L;           // how often the sender runs
+    private static final int SENDER_BATCH_SIZE = 3;                 // how many messages to attempt per interval
+    private static final int MAX_QUEUE_SIZE = 5000;                 // hard cap for queued messages
+    private static final long CHANNEL_CACHE_TTL_MS = 30_000L;       // how long to cache resolved channel
+    private static final long CHANNEL_MISSING_WARN_COOLDOWN_MS = 300_000L; // cooldown for local warning when channel missing
+    private static final int MAX_SEND_ATTEMPTS = 5;                 // how many times to retry a failed send (non-network failures)
 
     // Backoff during network outages (e.g., Ethernet down)
-    private static final long NETWORK_BACKOFF_BASE_MS = 5_000L;
-    private static final long NETWORK_BACKOFF_MAX_MS = 60_000L;
+    private static final long NETWORK_BACKOFF_BASE_MS = 15_000L;
+    private static final long NETWORK_BACKOFF_MAX_MS = 120_000L;
 
     // Rate-limit local send-failure warnings (to avoid console spam)
     private static final long SEND_FAIL_WARN_COOLDOWN_MS = 15_000L;
@@ -59,10 +72,7 @@ public class Alerts extends Handler {
 
     /**
      * Patterns of substrings which, if present in a formatted log message,
-     * will cause the alert to be silently ignored. This allows noise from
-     * known benign messages to be filtered out on a per-installation basis.
-     *
-     * Matching is case-sensitive (String.contains()).
+     * will cause the alert to be silently ignored.
      */
     private final List<String> ignoreList;
 
@@ -94,6 +104,11 @@ public class Alerts extends Handler {
     // closed flag to stop accepting new messages after close() invoked
     private volatile boolean closed = false;
 
+    // ---- Log4j2 capture (to catch console WARN/ERROR not emitted via JUL) ----
+    private volatile boolean log4jInstalled = false;
+    private volatile LoggerContext log4jCtx = null;
+    private volatile String log4jAppenderName = null;
+
     // message wrapper
     private static final class AlertMessage {
         final String content;
@@ -105,34 +120,14 @@ public class Alerts extends Handler {
         }
     }
 
-    /**
-     * Backwards-compatible constructor (no ignore list).
-     *
-     * @param token     Discord bot token
-     * @param channelId Channel ID to send alerts to (as a string, quote in YAML to be safe)
-     * @param pingType  Optional ping type; if null/empty defaults to "@everyone"
-     */
-    public Alerts(String token, String channelId, String pingType) {
-        this(token, channelId, pingType, null);
-    }
-
-    /**
-     * New constructor with ignore list support.
-     * Any formatted alert message containing any ignore substring will NOT be sent.
-     *
-     * @param token      Discord bot token
-     * @param channelId  Channel ID to send alerts to (as a string, quote in YAML to be safe)
-     * @param pingType   Optional ping type; if null/empty defaults to "@everyone"
-     * @param ignoreList List of substrings to filter out (case-sensitive); null/empty = no filtering
-     */
     public Alerts(String token, String channelId, String pingType, List<String> ignoreList) {
         this.token = Objects.requireNonNull(token, "token");
         this.channelId = Objects.requireNonNull(channelId, "channelId");
         this.pingType = (pingType == null || pingType.trim().isEmpty()) ? "@everyone" : pingType.trim();
 
-        // Copy ignore patterns defensively (and normalise null to empty list).
-        // IMPORTANT: To keep this class usable even if the caller forgets to pass the ignore list,
-        // we attempt a best-effort auto-load from plugin config.yml files when the provided list is empty.
+        // Ensure handler itself is willing to receive everything; we filter manually.
+        setLevel(Level.ALL);
+
         List<String> effectiveIgnore = (ignoreList == null) ? Collections.emptyList() : new ArrayList<>(ignoreList);
         if (effectiveIgnore.isEmpty()) {
             List<String> disk = tryLoadIgnoreListFromDisk();
@@ -141,7 +136,6 @@ public class Alerts extends Handler {
                 LOGGER.info("[Alerts] Loaded " + effectiveIgnore.size() + " ignore pattern(s) from config.yml on disk.");
             }
         }
-        // Trim and drop empties
         if (effectiveIgnore.isEmpty()) {
             this.ignoreList = Collections.emptyList();
         } else {
@@ -154,21 +148,21 @@ public class Alerts extends Handler {
             this.ignoreList = cleaned.isEmpty() ? Collections.emptyList() : cleaned;
         }
 
-        // start sender executor
         senderExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "Alerts-Sender-Thread");
             t.setDaemon(true);
             return t;
         });
 
-        // schedule the processing loop
         senderExecutor.scheduleAtFixedRate(this::processQueueSafely, 0L, SENDER_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
+        // Capture Log4j2 WARN/ERROR as well
+        installLog4jAppender();
 
         // initialize JDA in background
         initJdaAsync();
     }
 
-    // Initialize JDA on its own thread and allow JDA to set the jda field once ready.
     private void initJdaAsync() {
         Thread t = new Thread(() -> {
             try {
@@ -177,7 +171,6 @@ public class Alerts extends Handler {
                 jda = local;
                 LOGGER.info("[Alerts] Discord initialized successfully.");
 
-                // when JDA becomes ready, clear the cached channel so resolve attempt happens immediately
                 cachedChannel = null;
                 cachedChannelExpiry = 0L;
             } catch (InterruptedException ie) {
@@ -186,7 +179,6 @@ public class Alerts extends Handler {
             } catch (Exception e) {
                 LOGGER.log(Level.SEVERE, "[Alerts] Failed to initialize Discord: " + e.getMessage(), e);
             } finally {
-                // clear initThread reference when done
                 initThread = null;
             }
         }, "Discord-Init-Thread");
@@ -195,30 +187,30 @@ public class Alerts extends Handler {
         t.start();
     }
 
+    // ---------------- JUL capture ----------------
+
     @Override
     public void publish(LogRecord record) {
-        if (closed) return; // do not accept new records after close
+        if (closed) return;
         if (record == null) return;
 
-        // Prevent self-recursion (Alerts' own warnings/errors should not generate Discord alerts)
-        if (isSelfRecord(record)) return;
+        if (!isLoggable(record)) return;
 
-        // Prevent re-entrant loops even if logger names are unusual
+        if (isSelfRecord(record)) return;
         if (Boolean.TRUE.equals(IN_PUBLISH.get())) return;
 
         IN_PUBLISH.set(Boolean.TRUE);
         try {
-            if (record.getLevel().intValue() < Level.WARNING.intValue()) {
-                return; // only handle WARNING and above
-            }
+            if (record.getLevel().intValue() < Level.WARNING.intValue()) return;
 
-            // Build the formatted message, but also evaluate ignores against the *raw* message/throwable.
             String formatted = formatRecord(record);
-            if (shouldIgnore(record, formatted)) return;
+            String body = safeFormatBody(record);
+            Throwable thrown = record.getThrown();
+
+            if (shouldIgnoreStrings(formatted, body, thrown)) return;
 
             enqueueMessage(formatted);
         } catch (Throwable t) {
-            // publish must not throw
             try {
                 LOGGER.log(Level.SEVERE, "[Alerts] publish() failed: " + t.getMessage(), t);
             } catch (Throwable ignored) {
@@ -229,22 +221,145 @@ public class Alerts extends Handler {
     }
 
     private boolean isSelfRecord(LogRecord record) {
-        if (record == null) return false;
         String ln = record.getLoggerName();
         if (SELF_LOGGER_NAME.equals(ln)) return true;
         String sc = record.getSourceClassName();
         return SELF_LOGGER_NAME.equals(sc);
     }
 
-    // Enqueue a new message; if queue is too large we drop the oldest messages to keep bounded memory.
+    private String safeFormatBody(LogRecord record) {
+        try {
+            return formatMessageBody(record);
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    // ---------------- Log4j2 capture ----------------
+
+    private static final class DiscordLog4jAppender extends AbstractAppender {
+        private final Alerts alerts;
+
+        private DiscordLog4jAppender(String name, Alerts alerts) {
+            super(name, null, null, true, Property.EMPTY_ARRAY);
+            this.alerts = alerts;
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            if (alerts != null) {
+                alerts.onLog4jEvent(event);
+            }
+        }
+    }
+
+    private void installLog4jAppender() {
+        try {
+            LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+            Configuration config = ctx.getConfiguration();
+
+            String name = "KakchuDiscordAlerts-" + System.identityHashCode(this);
+            DiscordLog4jAppender app = new DiscordLog4jAppender(name, this);
+            app.start();
+
+            config.addAppender(app);
+
+            // Always attach to root
+            config.getRootLogger().addAppender(app, org.apache.logging.log4j.Level.WARN, null);
+
+            // Attach to non-additive logger configs (they would not bubble to root)
+            for (LoggerConfig lc : config.getLoggers().values()) {
+                if (!lc.isAdditive() && !lc.getAppenders().containsKey(name)) {
+                    lc.addAppender(app, org.apache.logging.log4j.Level.WARN, null);
+                }
+            }
+
+            ctx.updateLoggers();
+
+            log4jCtx = ctx;
+            log4jAppenderName = name;
+            log4jInstalled = true;
+
+            LOGGER.info("[Alerts] Log4j2 capture enabled (WARN+).");
+        } catch (Throwable t) {
+            log4jInstalled = false;
+            log4jCtx = null;
+            log4jAppenderName = null;
+            try {
+                LOGGER.log(Level.FINE, "[Alerts] Log4j2 capture not available: " + t.getMessage());
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void onLog4jEvent(LogEvent event) {
+        if (closed) return;
+        if (event == null) return;
+
+        if (Boolean.TRUE.equals(IN_PUBLISH.get())) return;
+
+        org.apache.logging.log4j.Level lvl = event.getLevel();
+        if (lvl == null || !lvl.isMoreSpecificThan(org.apache.logging.log4j.Level.WARN)) return;
+
+        String loggerName = event.getLoggerName();
+        if (SELF_LOGGER_NAME.equals(loggerName)) return;
+
+        IN_PUBLISH.set(Boolean.TRUE);
+        try {
+            String body = "";
+            try {
+                if (event.getMessage() != null) body = event.getMessage().getFormattedMessage();
+            } catch (Throwable ignored) {
+            }
+
+            Throwable thrown = null;
+            try {
+                thrown = event.getThrown();
+            } catch (Throwable ignored) {
+            }
+
+            String formatted = formatLog4jEvent(event, body, thrown);
+            if (shouldIgnoreStrings(formatted, body, thrown)) return;
+
+            enqueueMessage(formatted);
+        } catch (Throwable t) {
+            try {
+                LOGGER.log(Level.FINE, "[Alerts] onLog4jEvent() failed: " + t.getMessage(), t);
+            } catch (Throwable ignored) {
+            }
+        } finally {
+            IN_PUBLISH.set(Boolean.FALSE);
+        }
+    }
+
+    private String formatLog4jEvent(LogEvent event, String body, Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("⚠️ ").append(pingType).append(" [").append(event.getLevel() != null ? event.getLevel().name() : "WARN").append("]");
+        sb.append(" (").append(event.getLoggerName() != null ? event.getLoggerName() : "root").append(")");
+        if (body != null && !body.isEmpty()) sb.append(" ").append(body);
+
+        long ms = 0L;
+        try { ms = event.getTimeMillis(); } catch (Throwable ignored) {}
+        sb.append("\n").append("Time: ").append(Instant.ofEpochMilli(ms).toString());
+
+        if (t != null) {
+            sb.append("\nException: ").append(t.getClass().getName()).append(": ").append(t.getMessage());
+            String trace = getStackTraceString(t);
+            if (!trace.isEmpty()) {
+                sb.append("\n```").append(trace).append("```");
+            }
+        }
+        return sb.toString();
+    }
+
+    // ---------------- Queue + sending ----------------
+
     private void enqueueMessage(String formatted) {
         if (formatted == null) return;
         if (closed) return;
 
-        // enforce queue cap
         int currentSize = sendQueue.size();
         if (currentSize >= MAX_QUEUE_SIZE) {
-            // drop ~1/10th oldest to relieve pressure and record metric
             int toDrop = Math.max(1, MAX_QUEUE_SIZE / 10);
             for (int i = 0; i < toDrop; i++) {
                 AlertMessage polled = sendQueue.poll();
@@ -257,7 +372,6 @@ public class Alerts extends Handler {
         sendQueue.add(new AlertMessage(formatted));
     }
 
-    // Safe wrapper for processQueue to ensure exceptions are caught.
     private void processQueueSafely() {
         try {
             processQueue();
@@ -266,27 +380,17 @@ public class Alerts extends Handler {
         }
     }
 
-    // Main sending loop executed on senderExecutor at the configured interval.
     private void processQueue() {
         if (sendQueue.isEmpty()) return;
 
         long now = System.currentTimeMillis();
-        if (now < networkBackoffUntilMs) {
-            // Network seems down; keep queue intact and retry later.
-            return;
-        }
+        if (now < networkBackoffUntilMs) return;
 
-        // Ensure JDA is ready
         JDA localJda = jda;
-        if (localJda == null) {
-            // JDA not ready; nothing to send to Discord yet. We keep messages queued for later.
-            return;
-        }
+        if (localJda == null) return;
 
-        // Resolve channel (cached)
         TextChannel channel = resolveChannel(localJda);
         if (channel == null) {
-            // Channel still not resolvable; rate-limit a local warning and return (leave queue intact).
             if (now - lastChannelMissingWarn > CHANNEL_MISSING_WARN_COOLDOWN_MS) {
                 lastChannelMissingWarn = now;
                 LOGGER.warning("[Alerts] Could not find Discord channel with ID: " + channelId + " - will retry later.");
@@ -294,17 +398,13 @@ public class Alerts extends Handler {
             return;
         }
 
-        // Send up to SENDER_BATCH_SIZE messages from the queue
         for (int i = 0; i < SENDER_BATCH_SIZE; i++) {
             AlertMessage entry = sendQueue.poll();
             if (entry == null) break;
-
-            // split large messages and send each part asynchronously
             sendMessageParts(channel, entry);
         }
     }
 
-    // Resolve channel via JDA with caching
     private TextChannel resolveChannel(JDA localJda) {
         long now = System.currentTimeMillis();
         TextChannel ch = cachedChannel;
@@ -319,28 +419,23 @@ public class Alerts extends Handler {
             cachedChannelExpiry = now + CHANNEL_CACHE_TTL_MS;
             return resolved;
         } catch (Throwable t) {
-            // don't spam logs; we'll warn in a rate-limited fashion
             long last = lastChannelMissingWarn;
             if (System.currentTimeMillis() - last > CHANNEL_MISSING_WARN_COOLDOWN_MS) {
                 lastChannelMissingWarn = System.currentTimeMillis();
                 LOGGER.log(Level.WARNING, "[Alerts] Exception while resolving channel: " + t.getMessage(), t);
             }
-            // keep cachedChannel as null and try again later
             cachedChannel = null;
             cachedChannelExpiry = 0L;
             return null;
         }
     }
 
-    // Split a long message into DISCORD_MAX_LEN parts and send them asynchronously.
-    // On failure, the entire original message will be requeued up to MAX_SEND_ATTEMPTS (network failures do not count).
     private void sendMessageParts(TextChannel channel, AlertMessage entry) {
         if (entry == null || entry.content == null) return;
 
         final String original = entry.content;
         final int failuresSoFar = entry.attempts;
 
-        // If we've already tried too many times, drop it with a local log to avoid infinite retries.
         if (failuresSoFar >= MAX_SEND_ATTEMPTS) {
             LOGGER.warning("[Alerts] Dropping message after " + failuresSoFar + " failed attempts: " + summarizeForLog(original));
             return;
@@ -354,21 +449,14 @@ public class Alerts extends Handler {
             int end = Math.min(original.length(), start + DISCORD_MAX_LEN);
             String part = original.substring(start, end);
 
-            // send asynchronously; attach failure handler that requeues the original message
             channel.sendMessage(part).queue(
-                    success -> {
-                        // Any success means Discord/network is reachable again; clear backoff.
-                        clearNetworkBackoff();
-                    },
+                    success -> clearNetworkBackoff(),
                     throwable -> {
                         boolean networkIssue = isNetworkException(throwable);
-                        if (networkIssue) {
-                            applyNetworkBackoff();
-                        }
+                        if (networkIssue) applyNetworkBackoff();
 
                         maybeLogSendFailure(logged, throwable);
 
-                        // requeue only once per original message (even if multiple parts fail)
                         if (!closed && requeued.compareAndSet(false, true)) {
                             AlertMessage retry = new AlertMessage(original);
                             retry.attempts = failuresSoFar + (networkIssue ? 0 : 1);
@@ -387,7 +475,6 @@ public class Alerts extends Handler {
     }
 
     private void maybeLogSendFailure(AtomicBoolean logged, Throwable throwable) {
-        // only log once per original message
         if (logged != null && !logged.compareAndSet(false, true)) return;
 
         long now = System.currentTimeMillis();
@@ -398,7 +485,6 @@ public class Alerts extends Handler {
             } catch (Throwable ignored) {
             }
         } else {
-            // keep it quiet between cooldown windows
             try {
                 LOGGER.log(Level.FINE, "[Alerts] Failed to send message to Discord: " + (throwable == null ? "unknown" : throwable.getMessage()));
             } catch (Throwable ignored) {
@@ -409,7 +495,6 @@ public class Alerts extends Handler {
     private void applyNetworkBackoff() {
         long now = System.currentTimeMillis();
 
-        // If we're already backing off, extend at most to the new calculated value.
         long proposedUntil = now + networkBackoffMs;
         if (proposedUntil > networkBackoffUntilMs) {
             networkBackoffUntilMs = proposedUntil;
@@ -418,7 +503,6 @@ public class Alerts extends Handler {
         long next = networkBackoffMs * 2L;
         networkBackoffMs = Math.min(next, NETWORK_BACKOFF_MAX_MS);
 
-        // Force channel re-resolve after reconnect (harmless if it stays valid)
         cachedChannel = null;
         cachedChannelExpiry = 0L;
     }
@@ -433,8 +517,6 @@ public class Alerts extends Handler {
         int depth = 0;
         while (cur != null && depth++ < 8) {
             if (cur instanceof java.net.UnknownHostException ||
-                    cur instanceof java.net.ConnectException ||
-                    cur instanceof java.net.NoRouteToHostException ||
                     cur instanceof java.net.SocketTimeoutException ||
                     cur instanceof java.net.SocketException ||
                     cur instanceof java.nio.channels.UnresolvedAddressException) {
@@ -452,7 +534,8 @@ public class Alerts extends Handler {
         return s.substring(0, max) + "...(truncated)";
     }
 
-    // Format a LogRecord to a user-friendly Discord-friendly string, including thrown stack traces.
+    // ---------------- Formatting ----------------
+
     private String formatRecord(LogRecord record) {
         StringBuilder sb = new StringBuilder();
         sb.append("⚠️ ").append(pingType).append(" [").append(record.getLevel()).append("]");
@@ -465,7 +548,6 @@ public class Alerts extends Handler {
             sb.append("\nException: ").append(t.getClass().getName()).append(": ").append(t.getMessage());
             String trace = getStackTraceString(t);
             if (!trace.isEmpty()) {
-                // wrap in codeblock; note: splitting may break triple-backticks if too long, but safe enough
                 sb.append("\n```").append(trace).append("```");
             }
         }
@@ -496,7 +578,6 @@ public class Alerts extends Handler {
             t.printStackTrace(new PrintWriter(sw));
             return sw.toString();
         } catch (Exception e) {
-            // we must not throw from here
             try {
                 LOGGER.log(Level.WARNING, "[Alerts] Failed to extract stack trace: " + e.getMessage(), e);
             } catch (Throwable ignored) {
@@ -505,144 +586,15 @@ public class Alerts extends Handler {
         }
     }
 
-    @Override
-    public void flush() {
-        // nothing to flush: messages are in sendQueue and will be handled by senderExecutor.
-    }
+    // ---------------- Ignore list ----------------
 
-    // Close handler: stop executor and shut down JDA safely (bounded wait)
-    @Override
-    public void close() throws SecurityException {
-        if (closed) return; // idempotent
-        closed = true;
-
-        LOGGER.info("[Alerts] Closing Alerts handler: stopping sender executor, interrupting init, shutting down JDA...");
-
-        // 1) stop the sender executor (no more queue processing)
-        if (senderExecutor != null) {
-            try {
-                senderExecutor.shutdown(); // polite shutdown
-                if (!senderExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
-                    LOGGER.warning("[Alerts] Sender executor did not terminate within timeout; forcing shutdown.");
-                    senderExecutor.shutdownNow();
-                }
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                try { senderExecutor.shutdownNow(); } catch (Throwable ignored) {}
-            } catch (Throwable t) {
-                LOGGER.log(Level.WARNING, "[Alerts] Error shutting down sender executor: " + t.getMessage(), t);
-                try { senderExecutor.shutdownNow(); } catch (Throwable ignored) {}
-            }
-        }
-
-        // 2) interrupt init thread if JDA is still initializing
-        try {
-            Thread t = initThread;
-            if (t != null && t.isAlive()) {
-                LOGGER.fine("[Alerts] Interrupting JDA init thread...");
-                try {
-                    t.interrupt();
-                } catch (Throwable ignored) {}
-                // allow a short moment for init thread to respond
-                try {
-                    t.join(500);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-            initThread = null;
-        } catch (Throwable ignored) {}
-
-        // 3) attempt to shut down JDA and wait for JDA-related threads to finish (bounded wait)
-        try {
-            if (jda != null) {
-                try {
-                    LOGGER.fine("[Alerts] Calling jda.shutdownNow()...");
-                    try {
-                        jda.shutdownNow();
-                    } catch (Throwable t) {
-                        // fallback to shut down if shutdownNow not present / failed
-                        try { jda.shutdown(); } catch (Throwable ignored) {}
-                    }
-                } catch (Throwable t) {
-                    LOGGER.log(Level.WARNING, "[Alerts] Exception while initiating JDA shutdown: " + t.getMessage(), t);
-                }
-
-                // Wait for JDA related threads to exit. Bounded wait (5s).
-                final long deadline = System.currentTimeMillis() + 5_000L;
-
-                // Collect candidate threads once and then join them individually (no busy-wait loop)
-                List<Thread> toJoin = new ArrayList<>();
-                for (Thread thread : Thread.getAllStackTraces().keySet()) {
-                    if (thread == null) continue;
-                    String name = thread.getName();
-                    if (name == null) continue;
-                    String nl = name.toLowerCase();
-                    if ((nl.contains("jda") || nl.contains("discord") || nl.contains("websocket") ||
-                            nl.contains("gateway") || nl.contains("audio") || nl.contains("okhttp")) && thread.isAlive()) {
-                        toJoin.add(thread);
-                    }
-                }
-
-                for (Thread th : toJoin) {
-                    long remaining = deadline - System.currentTimeMillis();
-                    if (remaining <= 0) break;
-                    try {
-                        // join will block efficiently until th dies or timeout elapses
-                        th.join(remaining);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    } catch (Throwable joinEx) {
-                        LOGGER.log(Level.FINE, "[Alerts] Exception while joining thread " + th.getName() + ": " + joinEx.getMessage(), joinEx);
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            LOGGER.log(Level.WARNING, "[Alerts] Error while waiting for JDA threads to terminate: " + t.getMessage(), t);
-        } finally {
-            // clear JDA reference so GC can collect classloader resources
-            jda = null;
-        }
-
-        // 4) Final cleanup: clear queue and caches
-        try {
-            sendQueue.clear();
-        } catch (Throwable ignored) {}
-        try {
-            cachedChannel = null;
-            cachedChannelExpiry = 0L;
-        } catch (Throwable ignored) {}
-
-        LOGGER.info("[Alerts] Alerts handler closed.");
-    }
-
-    /**
-     * Determine whether an alert should be ignored based on the configured ignore list.
-     *
-     * Matching rules (for each pattern):
-     * - Exact substring match against the formatted message.
-     * - Exact substring match against the formatted *body* (record message + params).
-     * - Exact substring match against throwable message / stack trace (if present).
-     * - Case-insensitive, whitespace-normalized match against the above (fallback).
-     */
-    private boolean shouldIgnore(LogRecord record, String formatted) {
+    private boolean shouldIgnoreStrings(String formatted, String body, Throwable thrown) {
         if (ignoreList == null || ignoreList.isEmpty()) return false;
 
-        String body = null;
-        try {
-            body = formatMessageBody(record);
-        } catch (Throwable ignored) {
-        }
-
-        Throwable thrown = (record == null) ? null : record.getThrown();
         String thrownMsg = (thrown == null) ? null : thrown.getMessage();
         String stack = null;
         if (thrown != null) {
-            try {
-                stack = getStackTraceString(thrown);
-            } catch (Throwable ignored) {
-            }
+            try { stack = getStackTraceString(thrown); } catch (Throwable ignored) {}
         }
 
         for (String rawPattern : ignoreList) {
@@ -650,13 +602,11 @@ public class Alerts extends Handler {
             String pattern = rawPattern.trim();
             if (pattern.isEmpty()) continue;
 
-            // Fast exact contains (case-sensitive)
             if (formatted != null && formatted.contains(pattern)) return true;
             if (body != null && body.contains(pattern)) return true;
             if (thrownMsg != null && thrownMsg.contains(pattern)) return true;
             if (stack != null && stack.contains(pattern)) return true;
 
-            // Robust contains (case-insensitive + whitespace-normalized)
             String pN = normalizeForContains(pattern);
             if (pN.isEmpty()) continue;
 
@@ -671,7 +621,6 @@ public class Alerts extends Handler {
 
     private String normalizeForContains(String s) {
         if (s == null) return "";
-        // Lowercase + collapse whitespace so "a  b" matches "a b"
         String lower = s.toLowerCase();
         StringBuilder out = new StringBuilder(lower.length());
         boolean prevWs = false;
@@ -688,19 +637,13 @@ public class Alerts extends Handler {
         return out.toString().trim();
     }
 
-    /**
-     * Best-effort: load ignore list from any plugin config.yml on disk (typically plugins/<PluginName>/config.yml)
-     * that contains either "alerts.ignore" or "discord.ignore".
-     *
-     * This exists to prevent silent misconfiguration when the caller forgets to pass the ignore list into
-     * the Alerts constructor.
-     */
+    // ---------------- YAML best-effort ignore autoload ----------------
+
     private List<String> tryLoadIgnoreListFromDisk() {
         try {
             Path pluginsDir = Paths.get("plugins");
             if (!Files.isDirectory(pluginsDir)) return Collections.emptyList();
 
-            // Depth 2 is enough for plugins/<PluginName>/config.yml
             try (var stream = Files.walk(pluginsDir, 2)) {
                 for (Path p : (Iterable<Path>) stream::iterator) {
                     if (!Files.isRegularFile(p)) continue;
@@ -713,7 +656,6 @@ public class Alerts extends Handler {
                         continue;
                     }
 
-                    // Quick prefilter to avoid parsing every config.yml
                     String lower = text.toLowerCase();
                     if (!(lower.contains("alerts:") || lower.contains("discord:"))) continue;
 
@@ -729,17 +671,7 @@ public class Alerts extends Handler {
         return Collections.emptyList();
     }
 
-    /**
-     * Minimal YAML list extractor for the common pattern:
-     *
-     * parentKey:
-     *   childKey:
-     *     - item
-     *     - "item with spaces"
-     *
-     * Also supports inline lists: childKey: ["a", "b"]
-     */
-    private List<String> extractYamlStringList(String yaml, String parentKey, String childKey) {
+    private List<String> extractYamlStringList(String yaml, String parentKey, @SuppressWarnings("SameParameterValue") String childKey) {
         if (yaml == null) return Collections.emptyList();
         if (parentKey == null || childKey == null) return Collections.emptyList();
 
@@ -751,11 +683,9 @@ public class Alerts extends Handler {
 
         List<String> out = new ArrayList<>();
 
-        for (int i = 0; i < lines.length; i++) {
-            String line = lines[i];
+        for (String line : lines) {
             if (line == null) continue;
 
-            // strip comments (best effort)
             int hash = line.indexOf('#');
             String effective = (hash >= 0) ? line.substring(0, hash) : line;
             if (effective.trim().isEmpty()) continue;
@@ -763,29 +693,23 @@ public class Alerts extends Handler {
             int indent = countIndent(effective);
             String trimmed = effective.trim();
 
-            // Enter/exit parent
             if (!inParent) {
                 if (isYamlKey(trimmed, parentKey)) {
                     inParent = true;
                     parentIndent = indent;
-                    childIndent = -1;
-                    inChild = false;
                 }
                 continue;
             } else {
-                // If indentation returns to parent level or above and we're not on the parent key itself, we left parent.
                 if (indent <= parentIndent && !isYamlKey(trimmed, parentKey)) {
                     break;
                 }
             }
 
-            // Enter/exit child
             if (!inChild) {
                 if (indent > parentIndent && isYamlKey(trimmed, childKey)) {
                     inChild = true;
                     childIndent = indent;
 
-                    // Inline list support: ignore: ["a", "b"]
                     int colon = trimmed.indexOf(':');
                     if (colon >= 0) {
                         String after = trimmed.substring(colon + 1).trim();
@@ -798,18 +722,15 @@ public class Alerts extends Handler {
                 }
                 continue;
             } else {
-                // If indentation returns to child indent or above and it's not a list item, we left child list.
                 if (indent <= childIndent && !trimmed.startsWith("-")) {
                     break;
                 }
             }
 
-            if (inChild) {
-                if (indent > childIndent && trimmed.startsWith("-")) {
-                    String item = trimmed.substring(1).trim();
-                    item = stripQuotes(item);
-                    if (!item.isEmpty()) out.add(item);
-                }
+            if (indent > childIndent && trimmed.startsWith("-")) {
+                String item = trimmed.substring(1).trim();
+                item = stripQuotes(item);
+                if (!item.isEmpty()) out.add(item);
             }
         }
 
@@ -831,9 +752,7 @@ public class Alerts extends Handler {
         if (trimmed == null || key == null) return false;
         String k = key.trim();
         if (k.isEmpty()) return false;
-        // key:
         if (trimmed.equals(k + ":")) return true;
-        // key: value
         return trimmed.startsWith(k + ":");
     }
 
@@ -847,7 +766,6 @@ public class Alerts extends Handler {
     }
 
     private List<String> parseInlineYamlList(String bracketed) {
-        // bracketed: ["a", "b"] or [a, b]
         if (bracketed == null) return Collections.emptyList();
         String t = bracketed.trim();
         if (!t.startsWith("[") || !t.endsWith("]")) return Collections.emptyList();
@@ -883,5 +801,106 @@ public class Alerts extends Handler {
         String last = stripQuotes(cur.toString());
         if (!last.isEmpty()) out.add(last);
         return out;
+    }
+
+    // ---------------- Handler lifecycle ----------------
+
+    @Override
+    public void flush() {
+        // nothing to flush
+    }
+
+    @Override
+    public void close() throws SecurityException {
+        if (closed) return;
+        closed = true;
+
+        LOGGER.info("[Alerts] Closing Alerts handler...");
+
+        // Uninstall Log4j2 appender
+        uninstallLog4jAppender();
+
+        // Stop sender
+        if (senderExecutor != null) {
+            try {
+                senderExecutor.shutdown();
+                if (!senderExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
+                    senderExecutor.shutdownNow();
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                try { senderExecutor.shutdownNow(); } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                try { senderExecutor.shutdownNow(); } catch (Throwable ignored) {}
+            }
+        }
+
+        // Interrupt init thread if still initializing
+        try {
+            Thread t = initThread;
+            if (t != null && t.isAlive()) {
+                try { t.interrupt(); } catch (Throwable ignored) {}
+                try { t.join(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            }
+            initThread = null;
+        } catch (Throwable ignored) {}
+
+        // Shutdown JDA
+        try {
+            if (jda != null) {
+                try {
+                    jda.shutdownNow();
+                } catch (Throwable t) {
+                    try { jda.shutdown(); } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            jda = null;
+        }
+
+        try { sendQueue.clear(); } catch (Throwable ignored) {}
+        cachedChannel = null;
+        cachedChannelExpiry = 0L;
+
+        LOGGER.info("[Alerts] Alerts handler closed.");
+    }
+
+    private void uninstallLog4jAppender() {
+        if (!log4jInstalled) return;
+
+        try {
+            LoggerContext ctx = log4jCtx;
+            String name = log4jAppenderName;
+            if (ctx == null || name == null) return;
+
+            Configuration cfg = ctx.getConfiguration();
+
+            // Detach from root
+            try { cfg.getRootLogger().removeAppender(name); } catch (Throwable ignored) {}
+
+            // Detach from all logger configs (including non-additive ones)
+            try {
+                for (LoggerConfig lc : cfg.getLoggers().values()) {
+                    try { lc.removeAppender(name); } catch (Throwable ignored) {}
+                }
+            } catch (Throwable ignored) {}
+
+            // Remove from config appender map and stop it
+            try {
+                Appender app = cfg.getAppender(name);
+                try { cfg.getAppenders().remove(name); } catch (Throwable ignored) {}
+                if (app != null) {
+                    try { app.stop(); } catch (Throwable ignored) {}
+                }
+            } catch (Throwable ignored) {}
+
+            try { ctx.updateLoggers(); } catch (Throwable ignored) {}
+        } catch (Throwable ignored) {
+        } finally {
+            log4jInstalled = false;
+            log4jCtx = null;
+            log4jAppenderName = null;
+        }
     }
 }

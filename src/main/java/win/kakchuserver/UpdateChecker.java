@@ -107,22 +107,39 @@ public final class UpdateChecker implements Runnable {
                 return;
             }
 
+            // Prefer a direct file download URL; fall back to plugin.yml website if missing.
+            String downloadUrl = extractFirstFileUrl(latest);
             String projectPage = plugin.getDescription().getWebsite(); // from plugin.yml
+            if ((downloadUrl == null || downloadUrl.isBlank()) && projectPage != null && !projectPage.isBlank()) {
+                downloadUrl = projectPage.trim();
+            }
+            if (downloadUrl == null) downloadUrl = "";
 
-            String msg = "Update available: " + latestNumber + " (installed: " + current + "). " +
-                    (projectPage != null && !projectPage.isBlank() ? projectPage : "");
+            // Player-friendly multi-line, colored message (each line starts with a color code).
+            String playerMsg =
+                    "§2KakchuPlugin Update!\n" +
+                            "§7Installed: §c" + current + "\n" +
+                            "§7Latest: §a" + latestNumber + "\n" +
+                            "§b" + downloadUrl;
+
+            // Console-friendly (no color codes, single line)
+            String consoleMsg =
+                    "KakchuPlugin update available! Installed: " + current +
+                            " | Latest: " + latestNumber +
+                            (downloadUrl.isBlank() ? "" : " | Download: " + downloadUrl);
 
             // Cache for login notifications (safe off-thread: volatile fields)
-            plugin.setUpdateAvailable(latestNumber, msg);
+            plugin.setUpdateAvailable(latestNumber, playerMsg);
 
             // notify on main thread
             Bukkit.getScheduler().runTask(plugin, () -> {
-                if (notifyConsole) plugin.getLogger().warning(msg);
+                if (notifyConsole) plugin.getLogger().warning(consoleMsg);
 
                 if (notifyOps) {
+                    String[] lines = playerMsg.split("\n");
                     for (Player p : Bukkit.getOnlinePlayers()) {
                         if (p.isOp()) {
-                            p.sendMessage("§e" + msg);
+                            p.sendMessage(lines);
                         }
                     }
                 }
@@ -132,6 +149,18 @@ public final class UpdateChecker implements Runnable {
             if (notifyConsole) plugin.getLogger().warning("Update check failed: " + e.getMessage());
             // Don't clear cached update on transient exception
         }
+    }
+
+    private static String extractFirstFileUrl(JsonNode versionNode) {
+        if (versionNode == null) return null;
+        JsonNode files = versionNode.path("files");
+        if (!files.isArray() || files.isEmpty()) return null;
+
+        JsonNode first = files.get(0);
+        if (first == null) return null;
+
+        String url = first.path("url").asText("");
+        return url.isBlank() ? null : url;
     }
 
     private static String buildModrinthVersionsUrl(String projectId, List<String> loaders, String mcVersion) {

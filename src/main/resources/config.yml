@@ -3,11 +3,11 @@ discord:
   token: ""
   # channel: the channel ID for where you want the alerts to be sent.
   channel: ""
-  # ping: if empty defualts to @everyone. can be changed to @everyone @here, <@RoleID>, <@UserID> etc... or just normal text prefix to alert.
-  ping: "@everyone" # TODO make the alert prefix fully editable.
+  # ping: if empty defaults to @everyone. can be changed to @everyone @here, <@RoleID>, <@UserID> etc... or just normal text prefix to alert.
+  ping: ""
 
 links:
-  map-url: "https://YourMapWebsiteLink.com"
+  map-url: ""
 
 update-checker:
   enabled: true
