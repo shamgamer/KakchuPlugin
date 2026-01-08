@@ -415,13 +415,17 @@ public class Alerts extends Handler {
         recentFingerprints.compute(fp, (k, prev) -> {
             if (prev != null) {
                 long delta = timeMs - prev;
-                if (delta >= 0 && delta <= DEDUP_WINDOW_MS) {
+
+                // Accept small out-of-order jitter between JUL and Log4j2 timestamps.
+                long absDelta = (delta >= 0) ? delta : -delta;
+
+                if (absDelta <= DEDUP_WINDOW_MS) {
                     dup.set(true);
-                    // keep the first timestamp so we don't "extend" the window indefinitely
+                    // keep the first stored timestamp so we don't "extend" the window indefinitely
                     return prev;
                 }
-                // If clocks jitter or events arrive out of order, still allow it through.
             }
+            // not a dup (or first time): store this timestamp
             return timeMs;
         });
 
@@ -430,7 +434,6 @@ public class Alerts extends Handler {
             cleanupDedupCache(timeMs);
         }
         if (recentFingerprints.size() > DEDUP_MAX_SIZE_HARD) {
-            // hard safety valve
             recentFingerprints.clear();
         }
 
