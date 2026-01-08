@@ -67,6 +67,10 @@ public class Alerts extends Handler {
     // Rate-limit local send-failure warnings (to avoid console spam)
     private static final long SEND_FAIL_WARN_COOLDOWN_MS = 15_000L;
 
+    // How long to wait for JDA to fully shut down during plugin disable.
+    // This prevents "zip file closed" / classloader unload issues on shutdown.
+    private static final long JDA_SHUTDOWN_WAIT_MS = 10_000L;
+
     // ---- Cross-capture de-duplication (JUL + Log4j2 may both see the same event) ----
     // We drop *identical* events only if they occur within this short window.
     private static final long DEDUP_WINDOW_MS = 25L;
@@ -179,10 +183,19 @@ public class Alerts extends Handler {
 
     private void initJdaAsync() {
         Thread t = new Thread(() -> {
+            JDA local = null;
             try {
-                JDA local = JDABuilder.createDefault(token).build();
+                local = JDABuilder.createDefault(token).build();
                 local.awaitReady();
+
+                // If we got closed while initializing, shut down immediately and exit.
+                if (closed) {
+                    safeShutdownJda(local);
+                    return;
+                }
+
                 jda = local;
+                local = null; // ownership moved
                 LOGGER.info("[Alerts] Discord initialized successfully.");
 
                 cachedChannel = null;
@@ -193,6 +206,10 @@ public class Alerts extends Handler {
             } catch (Exception e) {
                 LOGGER.log(Level.SEVERE, "[Alerts] Failed to initialize Discord: " + e.getMessage(), e);
             } finally {
+                // If initialization failed or was interrupted after creating JDA, ensure it doesn't outlive the plugin.
+                if (local != null) {
+                    safeShutdownJda(local);
+                }
                 initThread = null;
             }
         }, "Discord-Init-Thread");
@@ -539,6 +556,7 @@ public class Alerts extends Handler {
     }
 
     private void processQueue() {
+        if (closed) return;
         if (sendQueue.isEmpty()) return;
 
         long now = System.currentTimeMillis();
@@ -961,6 +979,63 @@ public class Alerts extends Handler {
         return out;
     }
 
+// ---------------- JDA shutdown hardening ----------------
+
+    private void safeShutdownJda(JDA instance) {
+        if (instance == null) return;
+
+        try {
+            instance.shutdownNow();
+        } catch (Throwable ignored) {
+        }
+
+        boolean attemptedAwait = false;
+        boolean done = false;
+
+        // Prefer awaitShutdown if available (use reflection to avoid linkage issues)
+        try {
+            var m = instance.getClass().getMethod("awaitShutdown", long.class, TimeUnit.class);
+            attemptedAwait = true;
+
+            Object res = m.invoke(instance, JDA_SHUTDOWN_WAIT_MS, TimeUnit.MILLISECONDS);
+            if (res instanceof Boolean) done = (Boolean) res;
+        } catch (NoSuchMethodException ignored) {
+            // JDA version without awaitShutdown
+        } catch (java.lang.reflect.InvocationTargetException ite) {
+            Throwable cause = ite.getCause();
+            if (cause instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            // fall through to minimal fallback
+        } catch (Throwable ignored) {
+            // fall through to minimal fallback
+        }
+
+        // Fallback: only sleep if we could NOT awaitShutdown.
+        if (!done && !attemptedAwait) {
+            try {
+                Thread.sleep(JDA_SHUTDOWN_WAIT_MS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (Throwable ignored) {
+            }
+
+            try {
+                done = (instance.getStatus() == JDA.Status.SHUTDOWN);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        if (!done) {
+            try {
+                LOGGER.log(Level.FINE,
+                        "[Alerts] JDA did not fully shutdown within " + JDA_SHUTDOWN_WAIT_MS +
+                                "ms (status=" + instance.getStatus() + ")");
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     // ---------------- Handler lifecycle ----------------
 
     @Override
@@ -975,10 +1050,7 @@ public class Alerts extends Handler {
 
         LOGGER.info("[Alerts] Closing Alerts handler...");
 
-        // Uninstall Log4j2 appender
-        uninstallLog4jAppender();
-
-        // Stop sender
+        // Stop sender first
         if (senderExecutor != null) {
             try {
                 senderExecutor.shutdown();
@@ -998,24 +1070,23 @@ public class Alerts extends Handler {
             Thread t = initThread;
             if (t != null && t.isAlive()) {
                 try { t.interrupt(); } catch (Throwable ignored) {}
-                try { t.join(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                try { t.join(1000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
             }
             initThread = null;
         } catch (Throwable ignored) {}
 
-        // Shutdown JDA
+        // Shutdown JDA and WAIT for it to fully stop (prevents zip-file-closed errors on shutdown)
         try {
-            if (jda != null) {
-                try {
-                    jda.shutdownNow();
-                } catch (Throwable t) {
-                    try { jda.shutdown(); } catch (Throwable ignored) {}
-                }
+            JDA local = jda;
+            jda = null;
+            if (local != null) {
+                safeShutdownJda(local);
             }
         } catch (Throwable ignored) {
-        } finally {
-            jda = null;
         }
+
+        // Uninstall Log4j2 appender
+        uninstallLog4jAppender();
 
         try { sendQueue.clear(); } catch (Throwable ignored) {}
         cachedChannel = null;
