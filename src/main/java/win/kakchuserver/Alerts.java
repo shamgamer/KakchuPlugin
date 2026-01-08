@@ -17,6 +17,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -65,6 +66,19 @@ public class Alerts extends Handler {
 
     // Rate-limit local send-failure warnings (to avoid console spam)
     private static final long SEND_FAIL_WARN_COOLDOWN_MS = 15_000L;
+
+    // ---- Cross-capture de-duplication (JUL + Log4j2 may both see the same event) ----
+    // We drop *identical* events only if they occur within this short window.
+    private static final long DEDUP_WINDOW_MS = 25L;
+    // Keep fingerprints for a short retention to prevent unbounded growth.
+    private static final long DEDUP_RETENTION_MS = 30_000L;
+    private static final int DEDUP_MAX_SIZE_HARD = 10_000;
+
+    // Hardening: cap fingerprint field length so large repeating logs can't blow up memory/CPU.
+    private static final int FP_MAX_FIELD_LEN = 512;
+
+    private final ConcurrentHashMap<String, Long> recentFingerprints = new ConcurrentHashMap<>();
+    private final AtomicInteger fingerprintOps = new AtomicInteger(0);
 
     private final String token;
     private final String channelId;
@@ -203,11 +217,19 @@ public class Alerts extends Handler {
         try {
             if (record.getLevel().intValue() < Level.WARNING.intValue()) return;
 
-            String formatted = formatRecord(record);
             String body = safeFormatBody(record);
             Throwable thrown = record.getThrown();
 
+            // Formatting kept as-is for backwards compatibility with existing ignore patterns.
+            String formatted = formatRecord(record);
+
             if (shouldIgnoreStrings(formatted, body, thrown)) return;
+
+            long timeMs = record.getMillis();
+            if (timeMs <= 0L) timeMs = System.currentTimeMillis();
+
+            String fp = buildFingerprintFromJul(record, body, thrown);
+            if (shouldDropDuplicate(fp, timeMs)) return;
 
             enqueueMessage(formatted);
         } catch (Throwable t) {
@@ -318,8 +340,20 @@ public class Alerts extends Handler {
             } catch (Throwable ignored) {
             }
 
+            long timeMs = 0L;
+            try {
+                timeMs = event.getTimeMillis();
+            } catch (Throwable ignored) {
+            }
+            if (timeMs <= 0L) timeMs = System.currentTimeMillis();
+
+            // Formatting kept as-is for backwards compatibility with existing ignore patterns.
             String formatted = formatLog4jEvent(event, body, thrown);
+
             if (shouldIgnoreStrings(formatted, body, thrown)) return;
+
+            String fp = buildFingerprintFromLog4j(event, body, thrown);
+            if (shouldDropDuplicate(fp, timeMs)) return;
 
             enqueueMessage(formatted);
         } catch (Throwable t) {
@@ -350,6 +384,130 @@ public class Alerts extends Handler {
             }
         }
         return sb.toString();
+    }
+
+    // ---------------- De-duplication (shared) ----------------
+
+    private boolean shouldDropDuplicate(String fingerprint, long timeMs) {
+        if (fingerprint == null) return false;
+        String fp = fingerprint.trim();
+        if (fp.isEmpty()) return false;
+
+        final AtomicBoolean dup = new AtomicBoolean(false);
+
+        recentFingerprints.compute(fp, (k, prev) -> {
+            if (prev != null) {
+                long delta = timeMs - prev;
+                if (delta >= 0 && delta <= DEDUP_WINDOW_MS) {
+                    dup.set(true);
+                    // keep the first timestamp so we don't "extend" the window indefinitely
+                    return prev;
+                }
+                // If clocks jitter or events arrive out of order, still allow it through.
+            }
+            return timeMs;
+        });
+
+        int ops = fingerprintOps.incrementAndGet();
+        if ((ops & 0x7F) == 0) { // every 128 events
+            cleanupDedupCache(timeMs);
+        }
+        if (recentFingerprints.size() > DEDUP_MAX_SIZE_HARD) {
+            // hard safety valve
+            recentFingerprints.clear();
+        }
+
+        return dup.get();
+    }
+
+    private void cleanupDedupCache(long nowMs) {
+        try {
+            if (recentFingerprints.isEmpty()) return;
+            for (var e : recentFingerprints.entrySet()) {
+                Long ts = e.getValue();
+                if (ts == null) continue;
+                if (nowMs - ts > DEDUP_RETENTION_MS) {
+                    recentFingerprints.remove(e.getKey(), ts);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String buildFingerprintFromJul(LogRecord record, String body, Throwable thrown) {
+        String sev = canonicalSeverityFromJul(record == null ? null : record.getLevel());
+        String logger = (record != null && record.getLoggerName() != null) ? record.getLoggerName() : "root";
+        return buildFingerprint(sev, logger, body, thrown);
+    }
+
+    private String buildFingerprintFromLog4j(LogEvent event, String body, Throwable thrown) {
+        String sev = canonicalSeverityFromLog4j(event == null ? null : event.getLevel());
+        String logger = (event != null && event.getLoggerName() != null) ? event.getLoggerName() : "root";
+        return buildFingerprint(sev, logger, body, thrown);
+    }
+
+    private String buildFingerprint(String sev, String loggerName, String body, Throwable thrown) {
+        // Capped normalization to prevent huge log lines from causing big keys and long CPU walks.
+        String sSev = normalizeForContainsCapped(sev == null ? "" : sev, 16);
+        String sLogger = normalizeForContainsCapped(loggerName == null ? "" : loggerName, 128);
+        String sBody = normalizeForContainsCapped(body == null ? "" : body, FP_MAX_FIELD_LEN);
+
+        String tClass = "";
+        String tMsg = "";
+        if (thrown != null) {
+            try { tClass = thrown.getClass().getName(); } catch (Throwable ignored) {}
+            try { tMsg = thrown.getMessage(); } catch (Throwable ignored) {}
+        }
+
+        String sTClass = normalizeForContainsCapped(tClass, 256);
+        String sTMsg = normalizeForContainsCapped(tMsg, FP_MAX_FIELD_LEN);
+
+        // Keep it compact and stable.
+        return sSev + "|" + sLogger + "|" + sBody + "|" + sTClass + "|" + sTMsg;
+    }
+
+    private String canonicalSeverityFromJul(Level lvl) {
+        if (lvl == null) return "WARN";
+        if (lvl.intValue() >= Level.SEVERE.intValue()) return "ERROR";
+        if (lvl.intValue() >= Level.WARNING.intValue()) return "WARN";
+        return "INFO";
+    }
+
+    private String canonicalSeverityFromLog4j(org.apache.logging.log4j.Level lvl) {
+        if (lvl == null) return "WARN";
+        if (lvl.isMoreSpecificThan(org.apache.logging.log4j.Level.ERROR)) return "ERROR";
+        if (lvl.isMoreSpecificThan(org.apache.logging.log4j.Level.WARN)) return "WARN";
+        return "INFO";
+    }
+
+    /**
+     * Like normalizeForContains(), but stops once the output reaches capLen.
+     * This prevents huge messages from generating huge fingerprint keys and reduces CPU work.
+     */
+    private String normalizeForContainsCapped(String s, int capLen) {
+        if (s == null) return "";
+        if (capLen <= 0) return "";
+
+        String lower = s.toLowerCase();
+        StringBuilder out = new StringBuilder(Math.min(lower.length(), capLen));
+        boolean prevWs = false;
+
+        for (int i = 0; i < lower.length(); i++) {
+            if (out.length() >= capLen) break;
+
+            char c = lower.charAt(i);
+            boolean ws = Character.isWhitespace(c);
+            if (ws) {
+                if (!prevWs) {
+                    if (out.length() < capLen) out.append(' ');
+                }
+            } else {
+                out.append(c);
+            }
+            prevWs = ws;
+        }
+
+        return out.toString().trim();
     }
 
     // ---------------- Queue + sending ----------------
@@ -862,6 +1020,8 @@ public class Alerts extends Handler {
         try { sendQueue.clear(); } catch (Throwable ignored) {}
         cachedChannel = null;
         cachedChannelExpiry = 0L;
+
+        try { recentFingerprints.clear(); } catch (Throwable ignored) {}
 
         LOGGER.info("[Alerts] Alerts handler closed.");
     }

@@ -87,6 +87,9 @@ alerts:
   # ignore: a list of substrings; any alert whose formatted message contains one of these will not be sent.
   ignore:
     - "Cannot reply to ClientboundHelloPacket without profile and access token"
+    - "Geyser is configured to expect HAProxy protocol for incoming Bedrock connections."
+    - "If you do not know what this is, open the Geyser config, and set"
+    - "Geyser is configured to use proxy protocol when connecting to the Java server."
 
 help:
   # How many chat lines to show per page
