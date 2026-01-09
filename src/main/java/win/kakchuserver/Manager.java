@@ -109,21 +109,52 @@ public class Manager extends JavaPlugin {
     }
 
     private void enableDiscordAlertsEarly() {
-        String token = getConfig().getString("discord.token", "");
-        String channelId = getConfig().getString("discord.channel", "");
-        String pingType = getConfig().getString("discord.ping", "@everyone");
+        // Support both current (discord alerts.*) and legacy configs (discord.* / alerts.*).
+        final var cfg = getConfig();
 
-        // matches config.yml: alerts.ignore
-        List<String> ignore = new ArrayList<>(getConfig().getStringList("alerts.ignore"));
+        String tokenNew = trimToEmpty(cfg.getString("discord alerts.token", ""));
+        String channelNew = trimToEmpty(cfg.getString("discord alerts.channel", ""));
+        String pingNew = trimToEmpty(cfg.getString("discord alerts.ping", ""));
+
+        // Legacy (<= 2.7.0RC8 and earlier)
+        String tokenLegacy = trimToEmpty(cfg.getString("discord.token", ""));
+        String channelLegacy = trimToEmpty(cfg.getString("discord.channel", ""));
+        String pingLegacy = trimToEmpty(cfg.getString("discord.ping", ""));
+
+        String token = !tokenNew.isEmpty() ? tokenNew : tokenLegacy;
+        String channelId = !channelNew.isEmpty() ? channelNew : channelLegacy;
+
+        String pingType = !pingNew.isEmpty() ? pingNew : pingLegacy;
+        pingType = pingType.trim();
+        if (pingType.isEmpty()) pingType = "@everyone";
+
+        // Ignore list (new key first, then legacy fallbacks)
+        List<String> ignoreNew = cfg.getStringList("discord alerts.ignore");
+        List<String> ignoreLegacyDiscord = cfg.getStringList("discord.ignore");
+        List<String> ignoreLegacyAlerts = cfg.getStringList("alerts.ignore");
+
+        List<String> ignore = ignoreNew;
+        if (ignore.isEmpty()) ignore = ignoreLegacyDiscord;
+        if (ignore.isEmpty()) ignore = ignoreLegacyAlerts;
+        ignore = new ArrayList<>(ignore);
+
+        boolean usedLegacyValues =
+                (tokenNew.isEmpty() && !tokenLegacy.isEmpty()) ||
+                        (channelNew.isEmpty() && !channelLegacy.isEmpty()) ||
+                        (pingNew.isEmpty() && !pingLegacy.isEmpty()) ||
+                        (ignoreNew.isEmpty() && (!ignoreLegacyDiscord.isEmpty() || !ignoreLegacyAlerts.isEmpty()));
 
         if (token.isBlank() || channelId.isBlank()) {
             getLogger().warning("⚠️ Discord alert token/channel not set in config.yml.");
             return;
         }
+        if (usedLegacyValues) {
+            getLogger().warning("⚠️ Using legacy config keys for Discord alerts (discord.* / alerts.*). Please migrate to 'discord alerts:' in config.yml.");
+        }
 
         try {
             // Constructor is non-blocking; it starts JDA init on its own thread.
-            alertsHandler = new Alerts(token.trim(), channelId.trim(), pingType, ignore);
+            alertsHandler = new Alerts(token, channelId, pingType, ignore);
 
             Logger rootLogger = Logger.getLogger("");
             rootLogger.addHandler(alertsHandler);
@@ -132,6 +163,10 @@ public class Manager extends JavaPlugin {
         } catch (Exception e) {
             getLogger().log(Level.SEVERE, "❌ Failed to enable Discord alerts: " + e.getMessage(), e);
         }
+    }
+
+    private static String trimToEmpty(String s) {
+        return (s == null) ? "" : s.trim();
     }
 
     @Override
