@@ -44,7 +44,7 @@ public class Restarter implements Runnable {
         final LocalDate today = now.toLocalDate();
 
         String day = now.getDayOfWeek().name().toLowerCase(Locale.ROOT);
-        String basePath = plugin.getConfig().contains("restarter.schedule") ? "restarter" : "discord.restarter";
+        String basePath = plugin.getConfig().isConfigurationSection("restarter") ? "restarter" : plugin.getConfig().isConfigurationSection("discord.restarter") ? "discord.restarter" : "restarter";
         String schedulePath = basePath + ".schedule." + day;
         List<String> times = plugin.getConfig().getStringList(schedulePath);
 

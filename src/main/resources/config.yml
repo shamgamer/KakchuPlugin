@@ -1,23 +1,19 @@
-discord:
+discord alerts:
   # token: the bot token for the bot that will be sending the alerts.
   token: ""
   # channel: the channel ID for where you want the alerts to be sent.
   channel: ""
   # ping: if empty defaults to @everyone. can be changed to @everyone @here, <@RoleID>, <@UserID> etc... or just normal text prefix to alert.
   ping: ""
+  # ignore: a list of substrings; any alert whose formatted message contains one of these will not be sent.
+  ignore:
+    - "Cannot reply to ClientboundHelloPacket without profile and access token"
+    - "Geyser is configured to expect HAProxy protocol for incoming Bedrock connections."
+    - "If you do not know what this is, open the Geyser config, and set"
+    - "Geyser is configured to use proxy protocol when connecting to the Java server."
 
 links:
   map-url: ""
-
-update-checker:
-  enabled: true
-  project-id: "w6F3AvdX"
-  loaders: ["purpur", "paper"]
-  include-prerelease: true # false will ignore beta and alpha versions
-  interval-hours: 12
-  notify-console: true # Notify in console after server start + at interval hours
-  notify-ops: true # Notify in player's chat at interval hours
-  notify-ops-on-login: true # Notify in player's chat at login for ops
 
 uptime:
   flush-interval-seconds: 1
@@ -83,13 +79,15 @@ restarter: # All values are in server ticks, minecraft usually runs at 20 ticks 
     message: "&c⚠ Server is restarting now!"
     sound: "BLOCK_ANVIL_LAND"
 
-alerts:
-  # ignore: a list of substrings; any alert whose formatted message contains one of these will not be sent.
-  ignore:
-    - "Cannot reply to ClientboundHelloPacket without profile and access token"
-    - "Geyser is configured to expect HAProxy protocol for incoming Bedrock connections."
-    - "If you do not know what this is, open the Geyser config, and set"
-    - "Geyser is configured to use proxy protocol when connecting to the Java server."
+update-checker:
+  enabled: true
+  project-id: "w6F3AvdX"
+  loaders: ["purpur", "paper"]
+  include-prerelease: true # false will ignore beta and alpha versions
+  interval-hours: 12
+  notify-console: true # Notify in console after server start + at interval hours
+  notify-ops: true # Notify in player's chat at interval hours
+  notify-ops-on-login: true # Notify in player's chat at login for ops
 
 help:
   # How many chat lines to show per page

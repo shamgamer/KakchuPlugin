@@ -421,8 +421,7 @@ public class Alerts extends Handler {
 
                 if (absDelta <= DEDUP_WINDOW_MS) {
                     dup.set(true);
-                    // keep the first stored timestamp so we don't "extend" the window indefinitely
-                    return prev;
+                    return Math.min(prev, timeMs);
                 }
             }
             // not a dup (or first time): store this timestamp
@@ -836,13 +835,17 @@ public class Alerts extends Handler {
                     }
 
                     String lower = text.toLowerCase();
-                    if (!(lower.contains("alerts:") || lower.contains("discord:"))) continue;
+                    if (!(lower.contains("discord alerts:") || lower.contains("discord:") || lower.contains("alerts:"))) continue;
 
-                    List<String> a = extractYamlStringList(text, "alerts", "ignore");
+                    List<String> da = extractYamlStringList(text, "discord alerts", "ignore");
+                    if (!da.isEmpty()) return da;
+
+                    List<String> d = extractYamlStringList(text, "discord", "ignore"); // backwards compatibility for 2.7.0RC8 and before
+                    if (!d.isEmpty()) return d;
+
+                    List<String> a = extractYamlStringList(text, "alerts", "ignore"); // backwards compatibility for 2.7.0RC8 and before
                     if (!a.isEmpty()) return a;
 
-                    List<String> d = extractYamlStringList(text, "discord", "ignore");
-                    if (!d.isEmpty()) return d;
                 }
             }
         } catch (Throwable ignored) {
