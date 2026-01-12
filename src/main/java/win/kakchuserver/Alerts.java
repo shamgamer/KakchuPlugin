@@ -6,6 +6,7 @@ import net.dv8tion.jda.api.entities.channel.concrete.TextChannel;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,6 +29,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 // Log4j2 (server-provided on Paper; add as PROVIDED in pom if your IDE can’t resolve)
 import org.apache.logging.log4j.LogManager;
@@ -50,6 +52,9 @@ public class Alerts extends Handler {
      */
     private static final String SELF_LOGGER_NAME = Alerts.class.getName();
     private static final ThreadLocal<Boolean> IN_PUBLISH = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    // ANSI escape sequences (console colors, etc.). Example: "\u001B[31m"
+    private static final Pattern ANSI_ESCAPE = Pattern.compile("\u001B\\[[0-?]*[ -/]*[@-~]");
 
     // Configurable behavior
     private static final int DISCORD_MAX_LEN = 1999;                // Discord message size limit
@@ -181,6 +186,24 @@ public class Alerts extends Handler {
         initJdaAsync();
     }
 
+    /**
+     * Removes ANSI escape sequences and other control characters (except \n, \r, \t).
+     * Always returns a non-null String.
+     */
+    private static String sanitizeForDiscord(String s) {
+        if (s == null || s.isEmpty()) return "";
+        String noAnsi = ANSI_ESCAPE.matcher(s).replaceAll("");
+
+        StringBuilder out = new StringBuilder(noAnsi.length());
+        for (int i = 0; i < noAnsi.length(); i++) {
+            char c = noAnsi.charAt(i);
+            if (c == '\n' || c == '\r' || c == '\t' || (c >= 0x20 && c != 0x7F)) {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
     private void initJdaAsync() {
         Thread t = new Thread(() -> {
             JDA local = null;
@@ -234,21 +257,25 @@ public class Alerts extends Handler {
         try {
             if (record.getLevel().intValue() < Level.WARNING.intValue()) return;
 
-            String body = safeFormatBody(record);
+            String bodyRaw = safeFormatBodyRaw(record);
+            String bodySan = sanitizeForDiscord(bodyRaw);
+
             Throwable thrown = record.getThrown();
 
-            // Formatting kept as-is for backwards compatibility with existing ignore patterns.
-            String formatted = formatRecord(record);
+            // Raw formatted (for backwards-compat ignore patterns)
+            String formattedRaw = formatRecordRaw(record, bodyRaw, thrown);
+            // Sanitized formatted (what we actually send)
+            String formattedSan = formatRecordSanitized(record, bodySan, thrown);
 
-            if (shouldIgnoreStrings(formatted, body, thrown)) return;
+            if (shouldIgnoreStrings(formattedRaw, formattedSan, bodyRaw, bodySan, thrown)) return;
 
             long timeMs = record.getMillis();
             if (timeMs <= 0L) timeMs = System.currentTimeMillis();
 
-            String fp = buildFingerprintFromJul(record, body, thrown);
+            String fp = buildFingerprintFromJul(record, bodySan, thrown);
             if (shouldDropDuplicate(fp, timeMs)) return;
 
-            enqueueMessage(formatted);
+            enqueueMessage(formattedSan);
         } catch (Throwable t) {
             try {
                 LOGGER.log(Level.SEVERE, "[Alerts] publish() failed: " + t.getMessage(), t);
@@ -266,9 +293,9 @@ public class Alerts extends Handler {
         return SELF_LOGGER_NAME.equals(sc);
     }
 
-    private String safeFormatBody(LogRecord record) {
+    private String safeFormatBodyRaw(LogRecord record) {
         try {
-            return formatMessageBody(record);
+            return formatMessageBodyRaw(record);
         } catch (Throwable ignored) {
             return "";
         }
@@ -345,11 +372,12 @@ public class Alerts extends Handler {
 
         IN_PUBLISH.set(Boolean.TRUE);
         try {
-            String body = "";
+            String bodyRaw = "";
             try {
-                if (event.getMessage() != null) body = event.getMessage().getFormattedMessage();
+                if (event.getMessage() != null) bodyRaw = event.getMessage().getFormattedMessage();
             } catch (Throwable ignored) {
             }
+            String bodySan = sanitizeForDiscord(bodyRaw);
 
             Throwable thrown = null;
             try {
@@ -364,15 +392,17 @@ public class Alerts extends Handler {
             }
             if (timeMs <= 0L) timeMs = System.currentTimeMillis();
 
-            // Formatting kept as-is for backwards compatibility with existing ignore patterns.
-            String formatted = formatLog4jEvent(event, body, thrown);
+            // Raw formatted (for backwards-compat ignore patterns)
+            String formattedRaw = formatLog4jEvent(event, bodyRaw, thrown, false);
+            // Sanitized formatted (what we actually send)
+            String formattedSan = formatLog4jEvent(event, bodySan, thrown, true);
 
-            if (shouldIgnoreStrings(formatted, body, thrown)) return;
+            if (shouldIgnoreStrings(formattedRaw, formattedSan, bodyRaw, bodySan, thrown)) return;
 
-            String fp = buildFingerprintFromLog4j(event, body, thrown);
+            String fp = buildFingerprintFromLog4j(event, bodySan, thrown);
             if (shouldDropDuplicate(fp, timeMs)) return;
 
-            enqueueMessage(formatted);
+            enqueueMessage(formattedSan);
         } catch (Throwable t) {
             try {
                 LOGGER.log(Level.FINE, "[Alerts] onLog4jEvent() failed: " + t.getMessage(), t);
@@ -383,19 +413,27 @@ public class Alerts extends Handler {
         }
     }
 
-    private String formatLog4jEvent(LogEvent event, String body, Throwable t) {
+    private String formatLog4jEvent(LogEvent event, String body, Throwable t, boolean sanitizeException) {
         StringBuilder sb = new StringBuilder();
-        sb.append("⚠️ ").append(pingType).append(" [").append(event.getLevel() != null ? event.getLevel().name() : "WARN").append("]");
+        sb.append("⚠️ ").append(pingType).append(" [")
+                .append(event.getLevel() != null ? event.getLevel().name() : "WARN").append("]");
         sb.append(" (").append(event.getLoggerName() != null ? event.getLoggerName() : "root").append(")");
         if (body != null && !body.isEmpty()) sb.append(" ").append(body);
 
         long ms = 0L;
         try { ms = event.getTimeMillis(); } catch (Throwable ignored) {}
-        sb.append("\n").append("Time: ").append(Instant.ofEpochMilli(ms).toString());
-
+        sb.append("\n").append("Time: ").append(Instant.ofEpochMilli(ms));
         if (t != null) {
-            sb.append("\nException: ").append(t.getClass().getName()).append(": ").append(t.getMessage());
+            String tMsg = t.getMessage();
             String trace = getStackTraceString(t);
+            if (sanitizeException) {
+                tMsg = sanitizeForDiscord(tMsg);
+                trace = sanitizeForDiscord(trace);
+            } else {
+                tMsg = (tMsg == null) ? "" : tMsg;
+            }
+
+            sb.append("\nException: ").append(t.getClass().getName()).append(": ").append(tMsg);
             if (!trace.isEmpty()) {
                 sb.append("\n```").append(trace).append("```");
             }
@@ -466,10 +504,9 @@ public class Alerts extends Handler {
     }
 
     private String buildFingerprint(String sev, String loggerName, String body, Throwable thrown) {
-        // Capped normalization to prevent huge log lines from causing big keys and long CPU walks.
-        String sSev = normalizeForContainsCapped(sev == null ? "" : sev, 16);
-        String sLogger = normalizeForContainsCapped(loggerName == null ? "" : loggerName, 128);
-        String sBody = normalizeForContainsCapped(body == null ? "" : body, FP_MAX_FIELD_LEN);
+        String sSev = normalizeForContainsCapped(sev, 16);
+        String sLogger = normalizeForContainsCapped(loggerName, 128);
+        String sBody = normalizeForContainsCapped(body, FP_MAX_FIELD_LEN);
 
         String tClass = "";
         String tMsg = "";
@@ -481,7 +518,6 @@ public class Alerts extends Handler {
         String sTClass = normalizeForContainsCapped(tClass, 256);
         String sTMsg = normalizeForContainsCapped(tMsg, FP_MAX_FIELD_LEN);
 
-        // Keep it compact and stable.
         return sSev + "|" + sLogger + "|" + sBody + "|" + sTClass + "|" + sTMsg;
     }
 
@@ -501,13 +537,14 @@ public class Alerts extends Handler {
 
     /**
      * Like normalizeForContains(), but stops once the output reaches capLen.
-     * This prevents huge messages from generating huge fingerprint keys and reduces CPU work.
      */
     private String normalizeForContainsCapped(String s, int capLen) {
         if (s == null) return "";
         if (capLen <= 0) return "";
 
-        String lower = s.toLowerCase();
+        String cleaned = sanitizeForDiscord(s);
+        String lower = cleaned.toLowerCase();
+
         StringBuilder out = new StringBuilder(Math.min(lower.length(), capLen));
         boolean prevWs = false;
 
@@ -517,9 +554,7 @@ public class Alerts extends Handler {
             char c = lower.charAt(i);
             boolean ws = Character.isWhitespace(c);
             if (ws) {
-                if (!prevWs) {
-                    if (out.length() < capLen) out.append(' ');
-                }
+                if (!prevWs && out.length() < capLen) out.append(' ');
             } else {
                 out.append(c);
             }
@@ -653,7 +688,7 @@ public class Alerts extends Handler {
     }
 
     private void maybeLogSendFailure(AtomicBoolean logged, Throwable throwable) {
-        if (logged != null && !logged.compareAndSet(false, true)) return;
+        if (!logged.compareAndSet(false, true)) return;
 
         long now = System.currentTimeMillis();
         if (now - lastSendFailWarnMs > SEND_FAIL_WARN_COOLDOWN_MS) {
@@ -714,17 +749,17 @@ public class Alerts extends Handler {
 
     // ---------------- Formatting ----------------
 
-    private String formatRecord(LogRecord record) {
+    private String formatRecordRaw(LogRecord record, String bodyRaw, Throwable t) {
         StringBuilder sb = new StringBuilder();
         sb.append("⚠️ ").append(pingType).append(" [").append(record.getLevel()).append("]");
         sb.append(" (").append(record.getLoggerName() != null ? record.getLoggerName() : "root").append(")");
-        sb.append(" ").append(formatMessageBody(record));
-        sb.append("\n").append("Time: ").append(Instant.ofEpochMilli(record.getMillis()).toString());
+        sb.append(" ").append(bodyRaw == null ? "" : bodyRaw);
+        sb.append("\n").append("Time: ").append(Instant.ofEpochMilli(record.getMillis()));
 
-        Throwable t = record.getThrown();
         if (t != null) {
-            sb.append("\nException: ").append(t.getClass().getName()).append(": ").append(t.getMessage());
+            String tMsg = (t.getMessage() == null) ? "" : t.getMessage();
             String trace = getStackTraceString(t);
+            sb.append("\nException: ").append(t.getClass().getName()).append(": ").append(tMsg);
             if (!trace.isEmpty()) {
                 sb.append("\n```").append(trace).append("```");
             }
@@ -732,7 +767,25 @@ public class Alerts extends Handler {
         return sb.toString();
     }
 
-    private String formatMessageBody(LogRecord record) {
+    private String formatRecordSanitized(LogRecord record, String bodySan, Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("⚠️ ").append(pingType).append(" [").append(record.getLevel()).append("]");
+        sb.append(" (").append(record.getLoggerName() != null ? record.getLoggerName() : "root").append(")");
+        sb.append(" ").append(bodySan == null ? "" : bodySan);
+        sb.append("\n").append("Time: ").append(Instant.ofEpochMilli(record.getMillis()));
+
+        if (t != null) {
+            String tMsg = sanitizeForDiscord(t.getMessage());
+            String trace = sanitizeForDiscord(getStackTraceString(t));
+            sb.append("\nException: ").append(t.getClass().getName()).append(": ").append(tMsg);
+            if (!trace.isEmpty()) {
+                sb.append("\n```").append(trace).append("```");
+            }
+        }
+        return sb.toString();
+    }
+
+    private String formatMessageBodyRaw(LogRecord record) {
         String msg = record.getMessage();
         Object[] params = record.getParameters();
 
@@ -751,6 +804,7 @@ public class Alerts extends Handler {
     }
 
     private String getStackTraceString(Throwable t) {
+        if (t == null) return "";
         try {
             StringWriter sw = new StringWriter();
             t.printStackTrace(new PrintWriter(sw));
@@ -766,32 +820,51 @@ public class Alerts extends Handler {
 
     // ---------------- Ignore list ----------------
 
-    private boolean shouldIgnoreStrings(String formatted, String body, Throwable thrown) {
+    /**
+     * Ignore matching is performed against BOTH:
+     * - raw (original) strings (for backwards compatibility)
+     * - sanitized strings (so ignore patterns still match even when ANSI codes are present)
+     */
+    private boolean shouldIgnoreStrings(String formattedRaw, String formattedSan, String bodyRaw, String bodySan, Throwable thrown) {
         if (ignoreList == null || ignoreList.isEmpty()) return false;
 
-        String thrownMsg = (thrown == null) ? null : thrown.getMessage();
-        String stack = null;
-        if (thrown != null) {
-            try { stack = getStackTraceString(thrown); } catch (Throwable ignored) {}
-        }
+        final String fRaw = (formattedRaw == null) ? "" : formattedRaw;
+        final String bRaw = (bodyRaw == null) ? "" : bodyRaw;
+
+        final String fSan = sanitizeForDiscord(formattedSan == null ? fRaw : formattedSan);
+        final String bSan = sanitizeForDiscord(bodySan == null ? bRaw : bodySan);
+
+        final String thrownMsgRaw = (thrown == null || thrown.getMessage() == null) ? "" : thrown.getMessage();
+        final String stackRaw = (thrown == null) ? "" : getStackTraceString(thrown);
+
+        final String thrownMsgSan = sanitizeForDiscord(thrownMsgRaw);
+        final String stackSan = sanitizeForDiscord(stackRaw);
+
+        // Precompute normalized versions once (faster + cleaner)
+        final String fRawN = normalizeForContains(fRaw);
+        final String bRawN = normalizeForContains(bRaw);
+        final String fSanN = normalizeForContains(fSan);
+        final String bSanN = normalizeForContains(bSan);
+        final String thrownRawN = normalizeForContains(thrownMsgRaw);
+        final String stackRawN = normalizeForContains(stackRaw);
+        final String thrownSanN = normalizeForContains(thrownMsgSan);
+        final String stackSanN = normalizeForContains(stackSan);
 
         for (String rawPattern : ignoreList) {
             if (rawPattern == null) continue;
             String pattern = rawPattern.trim();
             if (pattern.isEmpty()) continue;
 
-            if (formatted != null && formatted.contains(pattern)) return true;
-            if (body != null && body.contains(pattern)) return true;
-            if (thrownMsg != null && thrownMsg.contains(pattern)) return true;
-            if (stack != null && stack.contains(pattern)) return true;
+            // Direct contains
+            if (fRaw.contains(pattern) || bRaw.contains(pattern) || thrownMsgRaw.contains(pattern) || stackRaw.contains(pattern)) return true;
+            if (fSan.contains(pattern) || bSan.contains(pattern) || thrownMsgSan.contains(pattern) || stackSan.contains(pattern)) return true;
 
+            // Normalized contains
             String pN = normalizeForContains(pattern);
             if (pN.isEmpty()) continue;
 
-            if (formatted != null && normalizeForContains(formatted).contains(pN)) return true;
-            if (body != null && normalizeForContains(body).contains(pN)) return true;
-            if (thrownMsg != null && normalizeForContains(thrownMsg).contains(pN)) return true;
-            if (stack != null && normalizeForContains(stack).contains(pN)) return true;
+            if (fRawN.contains(pN) || bRawN.contains(pN) || thrownRawN.contains(pN) || stackRawN.contains(pN)) return true;
+            if (fSanN.contains(pN) || bSanN.contains(pN) || thrownSanN.contains(pN) || stackSanN.contains(pN)) return true;
         }
 
         return false;
@@ -799,7 +872,8 @@ public class Alerts extends Handler {
 
     private String normalizeForContains(String s) {
         if (s == null) return "";
-        String lower = s.toLowerCase();
+        String cleaned = sanitizeForDiscord(s);
+        String lower = cleaned.toLowerCase();
         StringBuilder out = new StringBuilder(lower.length());
         boolean prevWs = false;
         for (int i = 0; i < lower.length(); i++) {
@@ -845,7 +919,6 @@ public class Alerts extends Handler {
 
                     List<String> a = extractYamlStringList(text, "alerts", "ignore"); // backwards compatibility for 2.7.0RC8 and before
                     if (!a.isEmpty()) return a;
-
                 }
             }
         } catch (Throwable ignored) {
@@ -1000,7 +1073,7 @@ public class Alerts extends Handler {
 
         // Prefer awaitShutdown if available (use reflection to avoid linkage issues)
         try {
-            var m = instance.getClass().getMethod("awaitShutdown", long.class, TimeUnit.class);
+            Method m = instance.getClass().getMethod("awaitShutdown", long.class, TimeUnit.class);
             attemptedAwait = true;
 
             Object res = m.invoke(instance, JDA_SHUTDOWN_WAIT_MS, TimeUnit.MILLISECONDS);
@@ -1012,9 +1085,7 @@ public class Alerts extends Handler {
             if (cause instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            // fall through to minimal fallback
         } catch (Throwable ignored) {
-            // fall through to minimal fallback
         }
 
         // Fallback: only sleep if we could NOT awaitShutdown.
