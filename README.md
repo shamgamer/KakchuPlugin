@@ -24,3 +24,4 @@ This projects has used AI in its development.
 ### Soft Dependencies (optional)
 * PlaceholderAPI
 * AxRewards
+* LuckPerms

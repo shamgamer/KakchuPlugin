@@ -89,7 +89,7 @@ class LoginRewardReminder implements Listener {
 
             if (template == null || template.isEmpty()) return;
 
-            streakManager.getCurrentStreakAsync(player.getUniqueId(), player.getName())
+            streakManager.getCurrentStreakAsync(player.getUniqueId(), player.getName(), player)
                     .whenComplete((streak, throwable) -> Bukkit.getScheduler().runTask(plugin, () -> {
                         if (!player.isOnline()) {
                             return;

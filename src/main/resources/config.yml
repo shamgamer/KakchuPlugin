@@ -1,12 +1,16 @@
-config-version: 1
+config-version: 2
+# config version is currently unused, planned for config version miss-match warnings and auto updates
 
 discord alerts:
-  # token: the bot token for the bot that will be sending the alerts.
-  token: ""
-  # channel: the channel ID for where you want the alerts to be sent.
-  channel: ""
-  # ping: if empty defaults to @everyone. can be changed to @everyone @here, <@RoleID>, <@UserID> etc... or just normal text prefix to alert.
-  ping: ""
+  enabled: true # toggle Discord log alerts.
+  # webhook-url: the Discord webhook URL that will receive alerts.
+  webhook-url: ""
+  # ping: can be changed to @everyone, @here, <@RoleID>, <@UserID> etc... or just normal text prefix to alert.
+  ping: "@everyone"
+  # alert-level: the minimum log level sent to Discord. valid values: info, warn, error
+  alert-level: "warn"
+  # ping-level: the minimum log level where ping text is included. valid values: info, warn, error, none
+  ping-level: "error"
   # ignore: a list of substrings; any alert whose formatted message contains one of these will not be sent.
   ignore:
     - "Cannot reply to ClientboundHelloPacket without profile and access token"
@@ -14,11 +18,13 @@ discord alerts:
     - "If you do not know what this is, open the Geyser config, and set"
     - "Geyser is configured to use proxy protocol when connecting to the Java server."
 
-links: # for minecraft color codes in messages, use § instead of &.
-  map-header: "§6Link To The World Map:" # the header before the url for /map. if empty only send link.
-  map-url: "map.changeme.com" # the link that will be sent bellow the header when using /map
+map: # for minecraft color codes in messages, use § instead of &.
+  enabled: true # toggle the /map command.
+  header: "§6Link To The World Map:" # the header before the url for /map. if empty only send link.
+  url: "map.changeme.com" # the link that will be sent bellow the header when using /map
 
 uptime:
+  enabled: true # toggle uptime tracking and /sham uptime.
   flush-interval-seconds: 1
   retention-days: -1 # the amount of days it keeps uptime logs, -1 is infinite.
   merge-gap-ms: 1000
@@ -27,7 +33,7 @@ uptime:
 restarter: # All values are in server ticks, minecraft usually runs at 20 ticks per second.
   start-delay-ticks: 432000   # default 6 hours (432000 ticks)
   interval-ticks: 10          # default 0.5 seconds (10 ticks)
-  schedule:
+  schedule:                   # 24-hour format
     sunday: [ ]
     monday:
       - "19:00"
@@ -109,12 +115,14 @@ axrewards:
       name: "entity.experience_orb.pickup"
       volume: 0.75
       pitch: 1.0
+
   login-streaks:
     # !! use /sham streak reward %player% <list> command in axrewards or outside to use !!
     enabled: true # toggles login streaks
     pause: false # prevents streaks from being lost when true, useful after long server maintenances
     claim_period: "24h" # how much time must pass before grace is lose (example 24h: 24h for daily then another 24h to claim before grace used)
-    grace_per_cycle: 2 # number of missed claim windows players can skip without losing their streak
+    default_grace_per_cycle: 2 # default number of missed claim windows players can skip without losing their streak
+    # using a permission plugin give shamplugin.graces.<number> to override per player/rank, for example shamplugin.graces.3
     grace_reset_period: "7d" # how often grace usage resets, counted from the day/time anchor below
     grace_reset_day: 1 # anchor day for the grace reset cycle, 0 Sunday 6 Saturday
     grace_reset_time: 0:30 # anchor time of day (UTC) for the grace reset cycle
@@ -150,6 +158,8 @@ axrewards:
               - "eco give %player% 150"
 
 help:
+  # toggles if /help will be enabled
+  enabled: true
   # How many chat lines to show per page
   lines-per-page: 3
   # Maximum visible characters allowed per chat line when packing commands.
@@ -190,13 +200,19 @@ help:
     - command: "/graves list"
       description: "List your graves"
     - command: "/rewards"
-      description: "Opens the money login rewards menu"
+      description: "Opens the login rewards menu"
+    - command: "/streak"
+      description: "Shows your streak and highest streak"
+    - command: "/streaktop"
+      description: "Shows the streaks leaderboard"
+    - command: "/higheststreaktop"
+      description: "Shows the highest streaks leaderboard"
     - command: "/order"
       description: "Opens the orders menu"
-    - command: "/ah"
+    - command: "/auc"
       description: "Opens the auction house menu"
     - command: "/hat"
-      description: "Wear the item in your hand as a hat (requires cacti rank)"
+      description: "Wear the item in your hand as a hat"
     - command: "/afk"
       description: "Toggle AFK status"
     - command: "/msg <player>"
@@ -214,7 +230,7 @@ help:
     - command: "/lay"
       description: "Lay down"
     - command: "/spin"
-      description: "Spin around (requires cacti rank)"
+      description: "Spin around"
     - command: "/bellyflop"
       description: "Belly flop!"
     - command: "/sham uptime"
@@ -224,7 +240,7 @@ help:
     - command: "/shop discord"
       description: "Modify discord bot alerts for shop events"
     - command: "/shop limit"
-      description: "Set how many items each player can buy for a spesific ammount of time"
+      description: "Set how many items each player can buy for a specific amount of time"
     - command: "/bal"
       description: "Show how much money you have"
     - command: "baltop"

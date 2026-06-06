@@ -1,5 +1,7 @@
 package win.shamserver.streaks;
 
+import org.bukkit.entity.Player;
+import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.sql.Connection;
@@ -39,10 +41,12 @@ public class LoginStreakManager {
     private static final long MILLIS_THRESHOLD = 1_000_000_000_000L;
     private static final DateTimeFormatter GRACE_TIME_FORMAT = DateTimeFormatter.ofPattern("H:mm");
     private static final Pattern DURATION_TOKEN = Pattern.compile("(\\d+)\\s*([smhdw])", Pattern.CASE_INSENSITIVE);
+    private static final String GRACE_PERMISSION_PREFIX = "shamplugin.graces.";
 
     private final JavaPlugin plugin;
     private final ExecutorService dbExecutor;
     private final Map<UUID, PlayerStreak> cache = new HashMap<>();
+    private final GraceOverrideResolver graceOverrideResolver;
 
     private Connection connection;
     private List<PlayerStreak> cachedTopCurrent = List.of();
@@ -87,6 +91,7 @@ public class LoginStreakManager {
             thread.setDaemon(true);
             return thread;
         });
+        this.graceOverrideResolver = createGraceOverrideResolver();
     }
 
     public boolean init() {
@@ -142,26 +147,56 @@ public class LoginStreakManager {
     }
 
     public CompletableFuture<StreakStatus> getStatusAsync(UUID uuid, String username) {
-        return runOnDbThread(() -> {
-            PlayerStreak streak = getOrLoad(uuid, username);
-            Projection projection = project(streak, currentEpochSecond());
+        return getStatusAsync(uuid, username, null);
+    }
 
-            return new StreakStatus(
-                    projection.current(),
-                    projection.highest(),
-                    projection.availableGraces(),
-                    getMaxGracePerCycle(),
-                    projection.timeUntilReset()
-            );
-        });
+    public CompletableFuture<StreakStatus> getStatusAsync(UUID uuid, String username, Player player) {
+        return resolveMaxGracePerCycleAsync(uuid, username, player)
+                .thenCompose(maxGracePerCycle -> runOnDbThread(() -> {
+                    PlayerStreak streak = getOrLoad(uuid, username);
+                    Projection projection = project(streak, currentEpochSecond(), maxGracePerCycle);
+
+                    return new StreakStatus(
+                            projection.current(),
+                            projection.highest(),
+                            projection.availableGraces(),
+                            maxGracePerCycle,
+                            projection.timeUntilReset()
+                    );
+                }));
+    }
+
+    public CompletableFuture<StreakStatus> getExistingStatusAsync(PlayerStreak streak, Player player) {
+        PlayerStreak snapshot = streak.copy();
+        return resolveMaxGracePerCycleAsync(snapshot.uuid, snapshot.username, player)
+                .thenApply(maxGracePerCycle -> {
+                    Projection projection = project(snapshot, currentEpochSecond(), maxGracePerCycle);
+
+                    return new StreakStatus(
+                            projection.current(),
+                            projection.highest(),
+                            projection.availableGraces(),
+                            maxGracePerCycle,
+                            projection.timeUntilReset()
+                    );
+                });
     }
 
     public CompletableFuture<Integer> getCurrentStreakAsync(UUID uuid, String username) {
-        return getStatusAsync(uuid, username).thenApply(StreakStatus::current);
+        return getCurrentStreakAsync(uuid, username, null);
+    }
+
+    public CompletableFuture<Integer> getCurrentStreakAsync(UUID uuid, String username, Player player) {
+        return getStatusAsync(uuid, username, player).thenApply(StreakStatus::current);
     }
 
     public CompletableFuture<ClaimResult> processClaimAsync(UUID uuid, String username, boolean countsForStreak) {
-        return runOnDbThread(() -> processClaim(uuid, username, countsForStreak));
+        return processClaimAsync(uuid, username, countsForStreak, null);
+    }
+
+    public CompletableFuture<ClaimResult> processClaimAsync(UUID uuid, String username, boolean countsForStreak, Player player) {
+        return resolveMaxGracePerCycleAsync(uuid, username, player)
+                .thenCompose(maxGracePerCycle -> runOnDbThread(() -> processClaim(uuid, username, countsForStreak, maxGracePerCycle)));
     }
 
     public CompletableFuture<List<PlayerStreak>> getTopCurrentAsync(int limit) {
@@ -175,6 +210,20 @@ public class LoginStreakManager {
         return runOnDbThread(() -> {
             updateLeaderboardsIfNeeded();
             return copyLeaderboard(cachedTopHighest, limit);
+        });
+    }
+
+    public CompletableFuture<PlayerStreak> findStreakByUuidAsync(UUID uuid) {
+        return runOnDbThread(() -> {
+            PlayerStreak streak = findByUuid(uuid);
+            return streak == null ? null : streak.copy();
+        });
+    }
+
+    public CompletableFuture<PlayerStreak> findStreakByUsernameAsync(String username) {
+        return runOnDbThread(() -> {
+            PlayerStreak streak = findByUsername(username);
+            return streak == null ? null : streak.copy();
         });
     }
 
@@ -205,10 +254,12 @@ public class LoginStreakManager {
     }
 
     public int getMaxGracePerCycle() {
-        String axPath = "axrewards.login-streaks.grace_per_cycle";
-        String oldAxPath = "axrewards.login-streaks.grace_per_week";
-        String legacyPath = "login_streaks.grace_per_cycle";
-        String oldLegacyPath = "login_streaks.grace_per_week";
+        String axPath = "axrewards.login-streaks.default_grace_per_cycle";
+        String oldAxPath = "axrewards.login-streaks.grace_per_cycle";
+        String oldAxWeekPath = "axrewards.login-streaks.grace_per_week";
+        String legacyPath = "login_streaks.default_grace_per_cycle";
+        String oldLegacyPath = "login_streaks.grace_per_cycle";
+        String oldLegacyWeekPath = "login_streaks.grace_per_week";
 
         if (plugin.getConfig().contains(axPath)) {
             return Math.max(0, plugin.getConfig().getInt(axPath));
@@ -216,10 +267,110 @@ public class LoginStreakManager {
         if (plugin.getConfig().contains(oldAxPath)) {
             return Math.max(0, plugin.getConfig().getInt(oldAxPath));
         }
+        if (plugin.getConfig().contains(oldAxWeekPath)) {
+            return Math.max(0, plugin.getConfig().getInt(oldAxWeekPath));
+        }
         if (plugin.getConfig().contains(legacyPath)) {
             return Math.max(0, plugin.getConfig().getInt(legacyPath));
         }
-        return Math.max(0, plugin.getConfig().getInt(oldLegacyPath, 2));
+        if (plugin.getConfig().contains(oldLegacyPath)) {
+            return Math.max(0, plugin.getConfig().getInt(oldLegacyPath));
+        }
+        return Math.max(0, plugin.getConfig().getInt(oldLegacyWeekPath, 2));
+    }
+
+    public int getMaxGracePerCycle(Player player) {
+        int defaultGrace = getMaxGracePerCycle();
+        if (player == null) {
+            return defaultGrace;
+        }
+
+        int permissionOverride = resolvePermissionGraceOverride(player);
+        return permissionOverride >= 0 ? permissionOverride : defaultGrace;
+    }
+
+    private int resolvePermissionGraceOverride(Player player) {
+        int override = Integer.MAX_VALUE;
+
+        for (PermissionAttachmentInfo permissionInfo : player.getEffectivePermissions()) {
+            if (!permissionInfo.getValue()) {
+                continue;
+            }
+
+            String permission = permissionInfo.getPermission();
+            if (permission == null) {
+                continue;
+            }
+
+            String normalized = permission.toLowerCase(Locale.ROOT);
+            if (!normalized.startsWith(GRACE_PERMISSION_PREFIX)) {
+                continue;
+            }
+
+            String suffix = normalized.substring(GRACE_PERMISSION_PREFIX.length());
+            try {
+                int parsed = Integer.parseInt(suffix);
+                if (parsed >= 0) {
+                    override = Math.min(override, parsed);
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+
+        return override == Integer.MAX_VALUE ? -1 : override;
+    }
+
+    private GraceOverrideResolver createGraceOverrideResolver() {
+        if (!plugin.getServer().getPluginManager().isPluginEnabled("LuckPerms")) {
+            return null;
+        }
+
+        try {
+            GraceOverrideResolver resolver = LuckPermsGraceOverrideResolver.tryCreate(plugin.getServer());
+            if (resolver != null) {
+                plugin.getLogger().info("LuckPerms grace override support enabled.");
+            }
+            return resolver;
+        } catch (Throwable throwable) {
+            plugin.getLogger().warning("Failed to hook LuckPerms grace override support: " + throwable.getMessage());
+            return null;
+        }
+    }
+
+    private CompletableFuture<Integer> resolveMaxGracePerCycleAsync(UUID uuid, String username, Player player) {
+        if (player != null) {
+            return CompletableFuture.completedFuture(getMaxGracePerCycle(player));
+        }
+
+        int defaultGrace = getMaxGracePerCycle();
+        if (graceOverrideResolver == null) {
+            return CompletableFuture.completedFuture(defaultGrace);
+        }
+
+        return graceOverrideResolver.resolveGraceOverride(uuid, username)
+                .handle((override, throwable) -> {
+                    if (throwable != null) {
+                        plugin.getLogger().warning("Failed to resolve grace override for " + username + ": " + throwable.getMessage());
+                        return defaultGrace;
+                    }
+
+                    return override != null && override >= 0 ? override : defaultGrace;
+                });
+    }
+
+    private int resolveMaxGracePerCycleBlocking(UUID uuid, String username) {
+        int defaultGrace = getMaxGracePerCycle();
+
+        try {
+            return resolveMaxGracePerCycleAsync(uuid, username, null).join();
+        } catch (CompletionException ex) {
+            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+            plugin.getLogger().warning("Failed to resolve leaderboard grace override for " + username + ": " + cause.getMessage());
+            return defaultGrace;
+        } catch (Exception ex) {
+            plugin.getLogger().warning("Failed to resolve leaderboard grace override for " + username + ": " + ex.getMessage());
+            return defaultGrace;
+        }
     }
 
     public Duration getTimeUntilGraceReset() {
@@ -231,10 +382,10 @@ public class LoginStreakManager {
         return Duration.ofSeconds(Math.max(0L, nextReset - now));
     }
 
-    private ClaimResult processClaim(UUID uuid, String username, boolean countsForStreak) throws Exception {
+    private ClaimResult processClaim(UUID uuid, String username, boolean countsForStreak, int maxGracePerCycle) throws Exception {
         PlayerStreak streak = getOrLoad(uuid, username);
         long now = currentEpochSecond();
-        Projection projection = project(streak, now);
+        Projection projection = project(streak, now, maxGracePerCycle);
         int rewardStreak = projection.current();
 
         if (!countsForStreak) {
@@ -339,6 +490,83 @@ public class LoginStreakManager {
         return created;
     }
 
+    private PlayerStreak findByUuid(UUID uuid) throws Exception {
+        PlayerStreak cached = cache.get(uuid);
+        if (cached != null) {
+            return cached;
+        }
+
+        ensureConnection();
+
+        try (PreparedStatement ps = connection.prepareStatement("SELECT * FROM streaks WHERE uuid=?")) {
+            ps.setString(1, uuid.toString());
+
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return loadFromResultSet(rs);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private PlayerStreak findByUsername(String username) throws Exception {
+        if (username == null || username.isBlank()) {
+            return null;
+        }
+
+        for (PlayerStreak cached : cache.values()) {
+            if (cached.username != null && cached.username.equalsIgnoreCase(username)) {
+                return cached;
+            }
+        }
+
+        ensureConnection();
+
+        try (PreparedStatement ps = connection.prepareStatement("""
+            SELECT * FROM streaks
+            WHERE username COLLATE NOCASE = ?
+            ORDER BY CASE WHEN username = ? THEN 0 ELSE 1 END
+            LIMIT 1
+        """)) {
+            ps.setString(1, username);
+            ps.setString(2, username);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return loadFromResultSet(rs);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private PlayerStreak loadFromResultSet(ResultSet rs) throws Exception {
+        UUID uuid = UUID.fromString(rs.getString("uuid"));
+        long storedLastClaim = readStoredLastClaim(rs);
+        long normalizedLastClaim = normalizeEpochSeconds(storedLastClaim);
+
+        PlayerStreak loaded = new PlayerStreak(
+                uuid,
+                rs.getString("username"),
+                rs.getInt("current_streak"),
+                rs.getInt("highest_streak"),
+                normalizedLastClaim,
+                rs.getInt("grace_used"),
+                readStoredGraceCycleKey(rs)
+        );
+
+        cache.put(uuid, loaded);
+
+        if (normalizedLastClaim != storedLastClaim) {
+            saveInternal(loaded);
+        }
+
+        return loaded;
+    }
+
     private void saveInternal(PlayerStreak streak) throws Exception {
         ensureConnection();
 
@@ -369,8 +597,7 @@ public class LoginStreakManager {
         invalidateLeaderboardCache();
     }
 
-    private Projection project(PlayerStreak streak, long now) {
-        int maxGrace = getMaxGracePerCycle();
+    private Projection project(PlayerStreak streak, long now, int maxGrace) {
         int currentGraceCycle = getCurrentGraceCycleKey(now);
         int effectiveGraceUsed = streak.graceWeek == currentGraceCycle ? streak.graceUsed : 0;
 
@@ -453,20 +680,26 @@ public class LoginStreakManager {
         List<PlayerStreak> rows = loadAllRows();
         long nowEpoch = currentEpochSecond();
 
-        cachedTopCurrent = rows.stream()
-                .map(row -> {
-                    Projection projection = project(row, nowEpoch);
-                    if (projection.current() <= 0) {
-                        return null;
-                    }
+        List<PlayerStreak> projectedCurrent = new ArrayList<>();
+        for (PlayerStreak row : rows) {
+            try {
+                int maxGracePerCycle = resolveMaxGracePerCycleBlocking(row.uuid, row.username);
+                Projection projection = project(row, nowEpoch, maxGracePerCycle);
+                if (projection.current() <= 0) {
+                    continue;
+                }
 
-                    PlayerStreak projected = row.copy();
-                    projected.current = projection.current();
-                    projected.graceUsed = projection.graceUsed();
-                    projected.graceWeek = projection.graceCycle();
-                    return projected;
-                })
-                .filter(Objects::nonNull)
+                PlayerStreak projected = row.copy();
+                projected.current = projection.current();
+                projected.graceUsed = projection.graceUsed();
+                projected.graceWeek = projection.graceCycle();
+                projectedCurrent.add(projected);
+            } catch (Exception ex) {
+                plugin.getLogger().warning("Skipping leaderboard entry for " + row.username + ": " + ex.getMessage());
+            }
+        }
+
+        cachedTopCurrent = projectedCurrent.stream()
                 .sorted(Comparator
                         .comparingInt((PlayerStreak streak) -> streak.current)
                         .reversed()

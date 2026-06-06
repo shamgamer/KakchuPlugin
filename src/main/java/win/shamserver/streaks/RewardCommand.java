@@ -1,7 +1,6 @@
 package win.shamserver.streaks;
 
 import org.bukkit.Bukkit;
-import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -18,6 +17,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 public class RewardCommand implements CommandExecutor, TabCompleter {
@@ -56,14 +56,6 @@ public class RewardCommand implements CommandExecutor, TabCompleter {
         String targetName = args[0];
         String typeInput = args[1].trim();
 
-        OfflinePlayer offline = plugin.getServer().getOfflinePlayer(targetName);
-        if (offline == null || (!offline.isOnline() && !offline.hasPlayedBefore())) {
-            sender.sendMessage("§cPlayer not found.");
-            return true;
-        }
-
-        String resolvedName = offline.getName() != null ? offline.getName() : targetName;
-
         String typePath = resolveTypePath(typeInput);
         if (typePath == null) {
             sender.sendMessage("§7No rewards configured for type: " + typeInput);
@@ -78,14 +70,28 @@ public class RewardCommand implements CommandExecutor, TabCompleter {
 
         boolean shouldIncrement = plugin.getConfig().getBoolean(typePath + ".streak", false);
 
-        manager.processClaimAsync(offline.getUniqueId(), resolvedName, shouldIncrement)
-                .whenComplete((claimResult, throwable) -> Bukkit.getScheduler().runTask(plugin, () -> {
+        StreakTargetResolver.resolve(plugin, manager, targetName, false)
+                .thenCompose(target -> {
+                    if (!target.found()) {
+                        return CompletableFuture.completedFuture(new RewardResult(target, null));
+                    }
+                    return manager.processClaimAsync(target.uuid(), target.name(), shouldIncrement, target.player())
+                            .thenApply(claimResult -> new RewardResult(target, claimResult));
+                })
+                .whenComplete((result, throwable) -> Bukkit.getScheduler().runTask(plugin, () -> {
                     if (throwable != null) {
-                        plugin.getLogger().warning("Failed to process streak claim for " + resolvedName + ": " + throwable.getMessage());
-                        sender.sendMessage("§cCould not process the reward for " + resolvedName + ".");
+                        plugin.getLogger().warning("Failed to process streak claim for " + targetName + ": " + throwable.getMessage());
+                        sender.sendMessage("§cCould not process the reward for " + targetName + ".");
                         return;
                     }
 
+                    if (!result.target().found()) {
+                        sender.sendMessage(StreakTargetResolver.failureMessage(result.target()));
+                        return;
+                    }
+
+                    LoginStreakManager.ClaimResult claimResult = result.claimResult();
+                    String resolvedName = result.target().name();
                     List<Integer> keys = bonusesSection.getKeys(false).stream().map(key -> {
                         try {
                             return Integer.parseInt(key);
@@ -211,5 +217,8 @@ public class RewardCommand implements CommandExecutor, TabCompleter {
         }
 
         sender.sendMessage("§eStreak for " + resolvedName + " remains " + claimResult.currentStreak() + ".");
+    }
+
+    private record RewardResult(StreakTargetResolver.Target target, LoginStreakManager.ClaimResult claimResult) {
     }
 }

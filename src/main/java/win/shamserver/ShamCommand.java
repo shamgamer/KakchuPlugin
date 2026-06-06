@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.logging.Level;
 
 public class ShamCommand implements CommandExecutor, TabCompleter {
 
@@ -62,6 +63,10 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
             return handleStreakCommand(sender, remaining);
         }
 
+        if (branch.equals("debug")) {
+            return handleDebugCommand(sender, remaining);
+        }
+
         sendRootUsage(sender);
         return true;
     }
@@ -78,39 +83,72 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
         String action = args[0].toLowerCase(Locale.ROOT);
         String[] remaining = Arrays.copyOfRange(args, 1, args.length);
 
-        if (action.equals("get")) {
-            if (!hasAdminPermission(sender)) {
-                sender.sendMessage("§cYou do not have permission.");
-                return true;
+        switch (action) {
+            case "get" -> {
+                if (!sender.hasPermission("shamplugin.streak.get.others")) {
+                    sender.sendMessage("§cYou do not have permission.");
+                    return true;
+                }
+                if (remaining.length < 1) {
+                    sender.sendMessage("§cUsage: /sham streak get <player>");
+                    return true;
+                }
+                return streakCommands.handleGetStatus(sender, remaining[0]);
             }
-            if (remaining.length < 1) {
-                sender.sendMessage("§cUsage: /sham streak get <player>");
-                return true;
+            case "set" -> {
+                if (!hasAdminPermission(sender)) {
+                    sender.sendMessage("§cYou do not have permission.");
+                    return true;
+                }
+                return streakCommands.handleSet(sender, remaining);
             }
-            return streakCommands.handleGetStatus(sender, remaining[0]);
-        }
-
-        if (action.equals("set")) {
-            if (!hasAdminPermission(sender)) {
-                sender.sendMessage("§cYou do not have permission.");
-                return true;
+            case "reward" -> {
+                if (!hasAdminPermission(sender)) {
+                    sender.sendMessage("§cYou do not have permission.");
+                    return true;
+                }
+                if (rewardCommand == null) {
+                    sender.sendMessage("§cLogin rewards are unavailable.");
+                    return true;
+                }
+                return rewardCommand.handleReward(sender, remaining);
             }
-            return streakCommands.handleSet(sender, remaining);
-        }
-
-        if (action.equals("reward")) {
-            if (!hasAdminPermission(sender)) {
-                sender.sendMessage("§cYou do not have permission.");
-                return true;
-            }
-            if (rewardCommand == null) {
-                sender.sendMessage("§cLogin rewards are unavailable.");
-                return true;
-            }
-            return rewardCommand.handleReward(sender, remaining);
         }
 
         sender.sendMessage("§cUsage: /sham streak [get|set|reward]");
+        return true;
+    }
+
+    private boolean handleDebugCommand(CommandSender sender, String[] args) {
+        if (!hasDebugPermission(sender)) {
+            sender.sendMessage("§cYou do not have permission.");
+            return true;
+        }
+        if (args.length != 1 || !args[0].equalsIgnoreCase("alerts")) {
+            sender.sendMessage("§cUsage: /sham debug alerts");
+            return true;
+        }
+
+        Manager plugin = Manager.getInstance();
+        if (!plugin.getConfig().getBoolean("discord alerts.enabled", true)) {
+            sender.sendMessage("§eDiscord alerts are disabled in config.yml.");
+            return true;
+        }
+
+        String webhook = plugin.getConfig().getString("discord alerts.webhook-url", "").trim();
+        String alertLevel = plugin.getConfig().getString("discord alerts.alert-level", "warn").trim();
+        String status = "webhook-url=" + (webhook.isBlank() ? "missing" : "set")
+                + ", handler=" + (plugin.isDiscordAlertsEnabled() ? "enabled" : "not running")
+                + ", alert-level=" + (alertLevel.isBlank() ? "warn" : alertLevel)
+                + ", webhook levels=" + expectedWebhookLevels(alertLevel);
+
+        plugin.getLogger().info("[Alerts Debug] INFO test log from /sham debug alerts");
+        plugin.getLogger().warning("[Alerts Debug] WARN test log from /sham debug alerts");
+        plugin.getLogger().log(Level.SEVERE, "[Alerts Debug] ERROR test log from /sham debug alerts");
+        plugin.getLogger().info("[Alerts Debug] " + status + ". Delivery is async; webhook HTTP failures will appear in console.");
+
+        sender.sendMessage("§aAlert debug logs emitted at INFO, WARN and ERROR.");
+        sender.sendMessage("§7" + status + ".");
         return true;
     }
 
@@ -135,24 +173,44 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
             return Collections.emptyList();
         }
 
+        if (branch.equals("debug")) {
+            if (!hasDebugPermission(sender)) {
+                return Collections.emptyList();
+            }
+            if (args.length == 2) {
+                return StringUtil.copyPartialMatches(args[1], List.of("alerts"), new ArrayList<>());
+            }
+            return Collections.emptyList();
+        }
+
         if (!branch.equals("streak") || streakCommands == null) {
             return Collections.emptyList();
         }
 
         if (args.length == 2) {
             List<String> options = new ArrayList<>();
-            if (hasAdminPermission(sender)) {
+
+            if (sender.hasPermission("shamplugin.streak.get.others")) {
                 options.add("get");
+            }
+            if (hasAdminPermission(sender)) {
                 options.add("set");
                 if (rewardCommand != null) {
                     options.add("reward");
                 }
             }
+
             return StringUtil.copyPartialMatches(args[1], options, new ArrayList<>());
         }
 
         String action = args[1].toLowerCase(Locale.ROOT);
-        if ((action.equals("get") || action.equals("set") || action.equals("reward")) && !hasAdminPermission(sender)) {
+
+        if (action.equals("get")
+                && !sender.hasPermission("shamplugin.streak.get.others")) {
+            return Collections.emptyList();
+        }
+
+        if ((action.equals("set") || action.equals("reward")) && !hasAdminPermission(sender)) {
             return Collections.emptyList();
         }
 
@@ -175,11 +233,25 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
         if (streakCommands != null && (sender.hasPermission("shamplugin.streak") || hasAdminPermission(sender))) {
             options.add("streak");
         }
+        if (hasDebugPermission(sender)) {
+            options.add("debug");
+        }
         return options;
     }
 
     private boolean hasAdminPermission(CommandSender sender) {
         return sender.isOp() || sender.hasPermission("shamplugin.admin");
+    }
+
+    private boolean hasDebugPermission(CommandSender sender) {
+        return sender.isOp() || sender.hasPermission("shamplugin.debug") || sender.hasPermission("shamplugin.admin");
+    }
+
+    private String expectedWebhookLevels(String rawLevel) {
+        Alerts.Severity level = Alerts.Severity.fromConfig(rawLevel);
+        if (level == Alerts.Severity.INFO) return "INFO/WARN/ERROR";
+        if (level == Alerts.Severity.ERROR) return "ERROR only";
+        return "WARN/ERROR";
     }
 
     private void sendRootUsage(CommandSender sender) {
@@ -190,12 +262,19 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
         if (streakCommands != null && sender.hasPermission("shamplugin.streak")) {
             sender.sendMessage("§e/sham streak");
         }
-        if (streakCommands != null && hasAdminPermission(sender)) {
+
+        if (streakCommands != null
+                && sender.hasPermission("shamplugin.streak.get.others")) {
             sender.sendMessage("§e/sham streak get <player>");
+        }
+        if (streakCommands != null && hasAdminPermission(sender)) {
             sender.sendMessage("§e/sham streak set <player> <value>");
             if (rewardCommand != null) {
                 sender.sendMessage("§e/sham streak reward <player> <type>");
             }
+        }
+        if (hasDebugPermission(sender)) {
+            sender.sendMessage("§e/sham debug alerts");
         }
     }
 }

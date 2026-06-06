@@ -53,8 +53,8 @@ public class Commands implements CommandExecutor {
                     return true;
                 }
 
-                String url = String.valueOf(Manager.getInstance().getConfig().getString("links.map-url", "")).trim();
-                String header = String.valueOf(Manager.getInstance().getConfig().getString("links.map-header", "")).trim();
+                String url = String.valueOf(Manager.getInstance().getConfig().getString("map.url", "")).trim();
+                String header = String.valueOf(Manager.getInstance().getConfig().getString("map.header", "")).trim();
 
                 if (url.isBlank()) {
                     sendMessage(sender, "§cMap URL empty! Contact an admin to fix the config.");
@@ -62,7 +62,7 @@ public class Commands implements CommandExecutor {
                     sendMessage(sender,
                             "§eTo modify the map link go to:",
                             "§7plugins/ShamPlugin/config.yml",
-                            "§7and look for §fmap-url",
+                            "§7and look for §furl §7under §fmap",
                             "if you are unable to find it refer to:",
                             "https://raw.githubusercontent.com/shamgamer/ShamPlugin/refs/heads/master/src/main/resources/config.yml"
                     );
@@ -187,10 +187,21 @@ public class Commands implements CommandExecutor {
                 sender.spigot().sendMessage(footer);
                 // small usage hint, checks if help hint is enabled, if it is checks if not only page 1 or is page 1 then sends the hint.
                 var cfg = Manager.getInstance().getConfig();
-                if (cfg.getBoolean("show-help-hint", true)
-                    && (!cfg.getBoolean("hint-page1-only", true) || page == 1)) {
-                        sender.spigot().sendMessage(new TextComponent(cfg.getString("help-hint","§7Click a command to place it in chat. Click the arrows to navigate pages.")));
+                if (cfg.getBoolean("help.show-help-hint", true)
+                    && (!cfg.getBoolean("help.hint-page1-only", true) || page == 1)) {
+                        sender.spigot().sendMessage(new TextComponent(cfg.getString("help.help-hint","§7Click a command to place it in chat. Click the arrows to navigate pages.")));
                 }
+            } else {
+                var cfg = Manager.getInstance().getConfig();
+                if (cfg.getBoolean("help.show-help-hint", true)
+                        && (!cfg.getBoolean("help.hint-page1-only", true) || page == 1)) {
+                    sender.sendMessage("Use /help <page> to navigate pages.");
+                }
+            }
+        } else if (sender instanceof org.bukkit.entity.Player) {
+            var cfg = Manager.getInstance().getConfig();
+            if (cfg.getBoolean("help.show-help-hint", true)) {
+                sender.spigot().sendMessage(new TextComponent(cfg.getString("help.help-hint","§7Click a command to place it in chat.")));
             }
         }
     }

@@ -8,11 +8,12 @@ api-version: 1.21
 softdepend:
   - PlaceholderAPI
   - AxRewards
+  - LuckPerms
 
 commands:
   sham:
     description: Root command for ShamPlugin commands
-    usage: /sham <streak|uptime> ...
+    usage: /sham <streak|uptime|debug> ...
     aliases: []
 
   map:
@@ -69,7 +70,29 @@ permissions:
     description: Allows usage of /streak, /sham streak, /streaktop and /higheststreaktop
     default: true
 
+  shamplugin.graces:
+    description: Base node for login streak grace overrides. Use shamplugin.graces.<number> to set a player's grace count.
+    default: false
+
+  shamplugin.graces.<number>:
+    description: Replace <number> with the grace amount, for example shamplugin.graces.3.
+    default: false
+
+  shamplugin.streak.get.others:
+    description: Access for /sham streak get <name>
+    default: op
+
+  shamplugin.debug:
+    description: Access for /sham debug commands set
+    default: op
+
   shamplugin.admin:
     description: Admin commands
     default: op
+    children:
+      shamplugin.streak: true
+      shamplugin.streak.get.others: true
+      shamplugin.uptime: true
+      shamplugin.debug: true
+
 build-time: ${build.time}

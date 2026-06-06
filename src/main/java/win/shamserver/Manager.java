@@ -41,13 +41,19 @@ public class Manager extends JavaPlugin {
         this.updateAvailableMessage = null;
     }
 
+    public boolean isDiscordAlertsEnabled() {
+        return alertsHandler != null;
+    }
+
     @Override
     public void onEnable() {
         instance = this;
 
         saveDefaultConfig();
 
-        enableDiscordAlertsEarly();
+        if (getConfig().getBoolean("discord alerts.enabled", true)) {
+            enableDiscordAlertsEarly();
+        }
 
         getLogger().info("✅ Sham Plugin enabled!");
 
@@ -62,17 +68,23 @@ public class Manager extends JavaPlugin {
             }
         }
 
-        try {
-            tracker = new UptimeTracker(this);
-            tracker.start();
+        if (getConfig().getBoolean("uptime.enabled", true)) {
+            try {
+                tracker = new UptimeTracker(this);
+                tracker.start();
             getLogger().info("✅ UptimeTracker started.");
-        } catch (Exception e) {
+            } catch (Exception e) {
             getLogger().log(Level.SEVERE, "❌ Failed to start UptimeTracker: " + e.getMessage(), e);
-            tracker = null;
+                tracker = null;
+            }
         }
 
-        registerCommand("map", new Commands());
-        registerCommand("help", new Commands());
+        if (getConfig().getBoolean("map.enabled", true)) {
+            registerCommand("map", new Commands());
+        }
+        if (getConfig().getBoolean("help.enabled", true)) {
+            registerCommand("help", new Commands());
+        }
 
         UptimeTracker.UptimeCommand uptimeCommand = null;
         if (tracker != null) {
@@ -115,12 +127,25 @@ public class Manager extends JavaPlugin {
     }
 
     private void enableDiscordAlertsEarly() {
-
         final var cfg = getConfig();
 
-        String token = trimToEmpty(cfg.getString("discord alerts.token", ""));
-        String channelId = trimToEmpty(cfg.getString("discord alerts.channel", ""));
+        String webhookUrl = trimToEmpty(cfg.getString("discord alerts.webhook-url", ""));
+        String legacyToken = trimToEmpty(cfg.getString("discord alerts.token", ""));
+        String legacyChannel = trimToEmpty(cfg.getString("discord alerts.channel", ""));
         String pingType = trimToEmpty(cfg.getString("discord alerts.ping", ""));
+
+        Alerts.Severity alertLevel = parseAlertSeverity(
+                cfg.getString("discord alerts.alert-level"),
+                Alerts.Severity.WARN,
+                "alert-level",
+                false
+        );
+        Alerts.Severity pingLevel = parseAlertSeverity(
+                cfg.getString("discord alerts.ping-level"),
+                Alerts.Severity.ERROR,
+                "ping-level",
+                true
+        );
 
         if (pingType.isEmpty()) {
             pingType = "@everyone";
@@ -128,13 +153,17 @@ public class Manager extends JavaPlugin {
 
         List<String> ignore = new ArrayList<>(cfg.getStringList("discord alerts.ignore"));
 
-        if (token.isBlank() || channelId.isBlank()) {
-            getLogger().warning("⚠️ Discord alert token/channel not set in config.yml.");
+        if (!legacyToken.isBlank() || !legacyChannel.isBlank()) {
+            getLogger().warning("⚠️ Legacy Discord bot settings detected under 'discord alerts.token/channel'. Switch to 'discord alerts.webhook-url' for alerts.");
+        }
+
+        if (webhookUrl.isBlank()) {
+            getLogger().warning("⚠️ Discord alert webhook-url not set in config.yml.");
             return;
         }
 
         try {
-            alertsHandler = new Alerts(token, channelId, pingType, ignore);
+            alertsHandler = new Alerts(webhookUrl, pingType, ignore, alertLevel, pingLevel);
 
             Logger rootLogger = Logger.getLogger("");
             rootLogger.addHandler(alertsHandler);
@@ -143,6 +172,23 @@ public class Manager extends JavaPlugin {
         } catch (Throwable t) {
             warnOptionalFeatureLoadFailure("❌ Discord alerts ", t);
         }
+    }
+
+    private Alerts.Severity parseAlertSeverity(String raw, Alerts.Severity fallback, String keyName, boolean allowNone) {
+        String value = trimToEmpty(raw);
+        if (allowNone && value.equalsIgnoreCase("none")) {
+            return null;
+        }
+
+        Alerts.Severity parsed = Alerts.Severity.fromConfig(value);
+        if (parsed != null) {
+            return parsed;
+        }
+
+        String accepted = allowNone ? "info, warn, error, none" : "info, warn, error";
+        getLogger().warning("❌ Invalid discord alerts " + keyName + " value '" + value + "'. Using default '" +
+                (fallback == null ? "none" : fallback.getConfigValue()) + "'. Accepted values: " + accepted + ".");
+        return fallback;
     }
 
     private static String trimToEmpty(String s) {
