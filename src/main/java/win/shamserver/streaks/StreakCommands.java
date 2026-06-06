@@ -44,19 +44,19 @@ public class StreakCommands implements CommandExecutor {
                             }
                             if (throwable != null) {
                                 plugin.getLogger().warning("Failed to load current streak leaderboard: " + throwable.getMessage());
-                                player.sendMessage("\u00A7cCould not load the streak leaderboard right now.");
+                                player.sendMessage("§cCould not load the streak leaderboard right now.");
                                 return;
                             }
 
-                            player.sendMessage("\u00A76Top Login Streaks");
+                            player.sendMessage("§6Top Login Streaks");
                             if (list.isEmpty()) {
-                                player.sendMessage("\u00A77No active streaks yet.");
+                                player.sendMessage("§7No active streaks yet.");
                                 return;
                             }
 
                             int index = 1;
                             for (PlayerStreak streak : list) {
-                                player.sendMessage("\u00A7e" + index + ". \u00A7f" + streak.username + " \u00A77- \u00A7a" + streak.current);
+                                player.sendMessage("§e" + index + ". §f" + streak.username + " §7- §a" + streak.current);
                                 index++;
                             }
                         }));
@@ -73,19 +73,19 @@ public class StreakCommands implements CommandExecutor {
                             }
                             if (throwable != null) {
                                 plugin.getLogger().warning("Failed to load highest streak leaderboard: " + throwable.getMessage());
-                                player.sendMessage("\u00A7cCould not load the highest streak leaderboard right now.");
+                                player.sendMessage("§cCould not load the highest streak leaderboard right now.");
                                 return;
                             }
 
-                            player.sendMessage("\u00A76Highest Streaks");
+                            player.sendMessage("§6Highest Streaks");
                             if (list.isEmpty()) {
-                                player.sendMessage("\u00A77No streak history yet.");
+                                player.sendMessage("§7No streak history yet.");
                                 return;
                             }
 
                             int index = 1;
                             for (PlayerStreak streak : list) {
-                                player.sendMessage("\u00A7e" + index + ". \u00A7f" + streak.username + " \u00A77- \u00A7a" + streak.highest);
+                                player.sendMessage("§e" + index + ". §f" + streak.username + " §7- §a" + streak.highest);
                                 index++;
                             }
                         }));
@@ -98,7 +98,7 @@ public class StreakCommands implements CommandExecutor {
 
     public boolean handleSelfStatus(@NonNull CommandSender sender) {
         if (!(sender instanceof Player player)) {
-            sender.sendMessage("\u00A7cOnly players can use /streak.");
+            sender.sendMessage("§cOnly players can use /streak.");
             return true;
         }
 
@@ -110,7 +110,7 @@ public class StreakCommands implements CommandExecutor {
                 .whenComplete((target, throwable) -> Bukkit.getScheduler().runTask(plugin, () -> {
                     if (throwable != null) {
                         plugin.getLogger().warning("Failed to resolve streak target " + targetName + ": " + throwable.getMessage());
-                        sender.sendMessage("\u00A7cCould not look up " + targetName + " right now.");
+                        sender.sendMessage("§cCould not look up " + targetName + " right now.");
                         return;
                     }
 
@@ -126,7 +126,7 @@ public class StreakCommands implements CommandExecutor {
 
     public boolean handleSet(@NonNull CommandSender sender, String @NonNull [] args) {
         if (args.length < 2) {
-            sender.sendMessage("\u00A7cUsage: /sham streak set <player> <value>");
+            sender.sendMessage("§cUsage: /sham streak set <player> <value>");
             return true;
         }
 
@@ -135,12 +135,12 @@ public class StreakCommands implements CommandExecutor {
         try {
             value = Integer.parseInt(args[1]);
         } catch (NumberFormatException e) {
-            sender.sendMessage("\u00A7cInvalid number.");
+            sender.sendMessage("§cInvalid number.");
             return true;
         }
 
         if (value < 0) {
-            sender.sendMessage("\u00A7cStreak value cannot be negative.");
+            sender.sendMessage("§cStreak value cannot be negative.");
             return true;
         }
 
@@ -155,7 +155,7 @@ public class StreakCommands implements CommandExecutor {
                 .whenComplete((result, throwable) -> Bukkit.getScheduler().runTask(plugin, () -> {
                     if (throwable != null) {
                         plugin.getLogger().warning("Failed to set streak for " + targetName + ": " + throwable.getMessage());
-                        sender.sendMessage("\u00A7cCould not set the streak for " + targetName + ".");
+                        sender.sendMessage("§cCould not set the streak for " + targetName + ".");
                         return;
                     }
 
@@ -164,7 +164,7 @@ public class StreakCommands implements CommandExecutor {
                         return;
                     }
 
-                    sender.sendMessage("\u00A7aSet " + result.target().name() + "'s streak to " + result.streak().current);
+                    sender.sendMessage("§aSet " + result.target().name() + "'s streak to " + result.streak().current);
                 }));
 
         return true;
@@ -189,7 +189,7 @@ public class StreakCommands implements CommandExecutor {
                     }
                     if (throwable != null) {
                         plugin.getLogger().warning("Failed to load streak for " + resolvedName + ": " + throwable.getMessage());
-                        sender.sendMessage(self ? "\u00A7cCould not load your streak right now." : "\u00A7cCould not load the streak for " + resolvedName + ".");
+                        sender.sendMessage(self ? "§cCould not load your streak right now." : "§cCould not load the streak for " + resolvedName + ".");
                         return;
                     }
 
@@ -203,7 +203,7 @@ public class StreakCommands implements CommandExecutor {
                 .whenComplete((status, throwable) -> Bukkit.getScheduler().runTask(plugin, () -> {
                     if (throwable != null) {
                         plugin.getLogger().warning("Failed to load streak for " + target.name() + ": " + throwable.getMessage());
-                        sender.sendMessage("\u00A7cCould not load the streak for " + target.name() + ".");
+                        sender.sendMessage("§cCould not load the streak for " + target.name() + ".");
                         return;
                     }
 
@@ -217,11 +217,11 @@ public class StreakCommands implements CommandExecutor {
                                    boolean self) {
         Duration graceReset = manager.getTimeUntilGraceReset();
         if (!self) {
-            sender.sendMessage("\u00A76Streak for " + resolvedName + ":");
+            sender.sendMessage("§6Streak for " + resolvedName + ":");
         }
-        sender.sendMessage("\u00A7aAvailable graces: \u00A7e" + status.availableGraces() + "/" + status.maxGraces() + " \u00A77(" + formatDuration(status.timeUntilReset()) + ")");
-        sender.sendMessage("\u00A7aGraces reset in: \u00A7e" + formatDuration(graceReset));
-        sender.sendMessage("\u00A7aActive Streak: \u00A7e" + status.current() + " \u00A77| \u00A7aHighest Streak: \u00A7e" + status.highest());
+        sender.sendMessage("§aAvailable graces: §e" + status.availableGraces() + "/" + status.maxGraces() + " §7(" + formatDuration(status.timeUntilReset()) + ")");
+        sender.sendMessage("§aGraces reset in: §e" + formatDuration(graceReset));
+        sender.sendMessage("§aActive Streak: §e" + status.current() + " §7| §aHighest Streak: §e" + status.highest());
     }
 
     private String formatDuration(Duration duration) {

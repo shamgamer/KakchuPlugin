@@ -79,9 +79,9 @@ final class StreakTargetResolver {
 
     static String failureMessage(Target target) {
         return switch (target.failure()) {
-            case DATABASE_MISS -> "\u00A7cNo streak record found for " + target.input() + ".";
-            case PROFILE_MISS -> "\u00A7cNo player profile found for " + target.input() + ".";
-            case INVALID_PROFILE_NAME -> "\u00A7cNo streak record found for " + target.input()
+            case DATABASE_MISS -> "§cNo streak record found for " + target.input() + ".";
+            case PROFILE_MISS -> "§cNo player profile found for " + target.input() + ".";
+            case INVALID_PROFILE_NAME -> "§cNo streak record found for " + target.input()
                     + ", and that name cannot be used for Java profile lookup.";
         };
     }
