@@ -1,5 +1,5 @@
 {
-  "supportedMinecraftVersions": ["1.21.11"],
+  "supportedMinecraftVersions": ["26.1.2", "1.21.11"],
   "26.3.0": {
     "working": ["26.1.2", "1.21.11"],
     "broken": ["1.0"]
