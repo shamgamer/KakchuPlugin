@@ -1,0 +1,23 @@
+# ShamPlugin 26.1.0 changelog:
+!! ensure to manually update the config, config auto updates aren't added yet !!
+* renamed plugin from kakchuplugin to shamplugin.
+* removed assistance, kakchutime, servertime aliases
+* changed UTF-8 BOM to UTF-8 in some files.
+* updated log4j core from 2.25.3 to 2.25.4
+* restarter is now deprecated, will not recive any updates and will be removed in version 27.1.0. due to ShamSMP replacing it with AMP server manager. (might be separated into a new plugin)
+* Slight improvements to console messages.
+* modified config default to not alert on prereleases. (include-prerelease: false)
+* streaks can now be lost (was broken)
+* added pause config option to streaks that prevents streak loss when enabled
+* grace periods and resets can now be configured.
+* added available graces, max graces, time until streak lost, graces reset timer, and highest streak to /streak
+* streaks leaderboard updates are now async
+* the header for /map can not be configured, if empty it will just send the url without it.
+* added configuration to the usage hint in /help
+* /streak set is now /sham streak set
+* added /sham streak get allows to get the /streak output of another user.
+* /uptime is now /sham uptime and also auto suggests the arguments
+* misc bugfixes and changes
+
+I probably forgot some changes:
+**Full Changelog**: https://github.com/shamgamer/ShamPlugin/compare/v3.0.1...v26.1.0

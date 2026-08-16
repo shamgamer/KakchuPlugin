@@ -1,0 +1,23 @@
+# ShamPlugin 26.2.0 Changelog:
+!! Ensure to manually update the config when upgrading to this version !!
+* Replaced bot based alerts to a discord Webhook to simplify setup and reduce file size
+* Replaced plain text alets for embeds
+* Added **LuckPerms** soft dependency
+* Added `shamplugin.graces.<number>` permission that allows for permission based graces
+* Changed console case for `/steak` and `/sham streak` to say `/streak` instead of `/sham streak` to avoid confusion with the `/sham streak` sub-commands.
+* Added hint case for page navigation when using `/help` via console
+* Added `shamplugin.streak.get.others` permission that controls to `/sham streak get <username>`
+* `shamplugin.admin` now inherits `.steak` `.streak.get.others` and `.uptime`
+* Slight improvements to some /sham commands cases.
+* log4j-api `2.24.3` => `2.25.4` (matching log4j-core)
+* Added the hint for when there is only 1 page
+* Changed the `/map` command config category from `links` to `map`
+* Added toggle to disable `/map`
+* Added toggle to disable `/help`
+* Added `/sham debug alerts` command
+* Added toggle to disable uptime tracking and `/sham uptime`
+* Added toggle to disable alerts
+* Improved geyser player handling for `/sham streak get` `/streaktop` and `/higheststreaktop`
+* Fixed help command searching `root` rather than the `help` section for these configs: `show-help-hint` `hint-page1-only` `help-hint`
+
+**Full Changelog**: https://github.com/shamgamer/ShamPlugin/compare/v26.1.0...v26.2.0

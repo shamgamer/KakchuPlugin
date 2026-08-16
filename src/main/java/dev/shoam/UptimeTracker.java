@@ -1,4 +1,4 @@
-package win.shamserver;
+package dev.shoam;
 
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;

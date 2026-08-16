@@ -1,4 +1,4 @@
-package win.shamserver.streaks;
+package dev.shoam.streaks;
 
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
@@ -125,8 +125,8 @@ public class StreakCommands implements CommandExecutor {
     }
 
     public boolean handleSet(@NonNull CommandSender sender, String @NonNull [] args) {
-        if (args.length < 2) {
-            sender.sendMessage("§cUsage: /sham streak set <player> <value>");
+        if (args.length < 2 || args.length > 3) {
+            sender.sendMessage("§cUsage: /sham streak set <player> <value> [modify-last-claim]");
             return true;
         }
 
@@ -144,12 +144,20 @@ public class StreakCommands implements CommandExecutor {
             return true;
         }
 
+        boolean modifyLastClaim = args.length < 3 || args[2].equalsIgnoreCase("true");
+        if (args.length == 3) {
+            if (!args[2].equalsIgnoreCase("true") && !args[2].equalsIgnoreCase("false")) {
+                sender.sendMessage("§cModify-last-claim must be true or false.");
+                return true;
+            }
+        }
+
         StreakTargetResolver.resolve(plugin, manager, targetName, false)
                 .thenCompose(target -> {
                     if (!target.found()) {
                         return CompletableFuture.completedFuture(new SetResult(target, null));
                     }
-                    return manager.setStreakAsync(target.uuid(), target.name(), value)
+                    return manager.setStreakAsync(target.uuid(), target.name(), value, modifyLastClaim)
                             .thenApply(streak -> new SetResult(target, streak));
                 })
                 .whenComplete((result, throwable) -> Bukkit.getScheduler().runTask(plugin, () -> {

@@ -1,4 +1,4 @@
-package win.shamserver.streaks;
+package dev.shoam.streaks;
 
 import org.bukkit.entity.Player;
 import org.bukkit.permissions.PermissionAttachmentInfo;
@@ -18,13 +18,13 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.TemporalAdjusters;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.PriorityQueue;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
@@ -42,6 +42,15 @@ public class LoginStreakManager {
     private static final DateTimeFormatter GRACE_TIME_FORMAT = DateTimeFormatter.ofPattern("H:mm");
     private static final Pattern DURATION_TOKEN = Pattern.compile("(\\d+)\\s*([smhdw])", Pattern.CASE_INSENSITIVE);
     private static final String GRACE_PERMISSION_PREFIX = "shamplugin.graces.";
+    private static final int LEADERBOARD_CACHE_SIZE = 100;
+    static final Comparator<PlayerStreak> CURRENT_LEADERBOARD_ORDER = Comparator
+            .comparingInt((PlayerStreak streak) -> streak.current)
+            .reversed()
+            .thenComparing(streak -> streak.username == null ? "" : streak.username, String.CASE_INSENSITIVE_ORDER);
+    static final Comparator<PlayerStreak> HIGHEST_LEADERBOARD_ORDER = Comparator
+            .comparingInt((PlayerStreak streak) -> streak.highest)
+            .reversed()
+            .thenComparing(streak -> streak.username == null ? "" : streak.username, String.CASE_INSENSITIVE_ORDER);
 
     private final JavaPlugin plugin;
     private final ExecutorService dbExecutor;
@@ -110,6 +119,14 @@ public class LoginStreakManager {
                         grace_used INTEGER,
                         grace_week INTEGER
                         )
+                    """);
+                    stmt.executeUpdate("""
+                        CREATE INDEX IF NOT EXISTS idx_streaks_current_leaderboard
+                        ON streaks (current_streak DESC, username COLLATE NOCASE ASC)
+                    """);
+                    stmt.executeUpdate("""
+                        CREATE INDEX IF NOT EXISTS idx_streaks_highest_leaderboard
+                        ON streaks (highest_streak DESC, username COLLATE NOCASE ASC)
                     """);
                 }
 
@@ -227,7 +244,7 @@ public class LoginStreakManager {
         });
     }
 
-    public CompletableFuture<PlayerStreak> setStreakAsync(UUID uuid, String username, int value) {
+    public CompletableFuture<PlayerStreak> setStreakAsync(UUID uuid, String username, int value, boolean modifyLastClaim) {
         return runOnDbThread(() -> {
             PlayerStreak streak = getOrLoad(uuid, username);
             long now = currentEpochSecond();
@@ -241,8 +258,10 @@ public class LoginStreakManager {
 
             if (value <= 0) {
                 streak.current = 0;
-                streak.lastClaim = 0;
-            } else {
+                if (modifyLastClaim) {
+                    streak.lastClaim = 0;
+                }
+            } else if (modifyLastClaim) {
                 streak.lastClaim = now;
             }
             streak.graceUsed = 0;
@@ -677,70 +696,102 @@ public class LoginStreakManager {
             return;
         }
 
-        List<PlayerStreak> rows = loadAllRows();
-        long nowEpoch = currentEpochSecond();
-
-        List<PlayerStreak> projectedCurrent = new ArrayList<>();
-        for (PlayerStreak row : rows) {
-            try {
-                int maxGracePerCycle = resolveMaxGracePerCycleBlocking(row.uuid, row.username);
-                Projection projection = project(row, nowEpoch, maxGracePerCycle);
-                if (projection.current() <= 0) {
-                    continue;
-                }
-
-                PlayerStreak projected = row.copy();
-                projected.current = projection.current();
-                projected.graceUsed = projection.graceUsed();
-                projected.graceWeek = projection.graceCycle();
-                projectedCurrent.add(projected);
-            } catch (Exception ex) {
-                plugin.getLogger().warning("Skipping leaderboard entry for " + row.username + ": " + ex.getMessage());
-            }
-        }
-
-        cachedTopCurrent = projectedCurrent.stream()
-                .sorted(Comparator
-                        .comparingInt((PlayerStreak streak) -> streak.current)
-                        .reversed()
-                        .thenComparing(streak -> streak.username == null ? "" : streak.username, String.CASE_INSENSITIVE_ORDER))
-                .limit(100)
-                .toList();
-
-        cachedTopHighest = rows.stream()
-                .map(PlayerStreak::copy)
-                .sorted(Comparator
-                        .comparingInt((PlayerStreak streak) -> streak.highest)
-                        .reversed()
-                        .thenComparing(streak -> streak.username == null ? "" : streak.username, String.CASE_INSENSITIVE_ORDER))
-                .limit(100)
-                .toList();
+        cachedTopCurrent = loadTopCurrent();
+        cachedTopHighest = loadTopHighest();
 
         lastLeaderboardUpdate = now;
     }
 
-    private List<PlayerStreak> loadAllRows() throws Exception {
+    private List<PlayerStreak> loadTopCurrent() throws Exception {
         ensureConnection();
+        long nowEpoch = currentEpochSecond();
+        PriorityQueue<PlayerStreak> top = new PriorityQueue<>(LEADERBOARD_CACHE_SIZE, CURRENT_LEADERBOARD_ORDER.reversed());
 
-        List<PlayerStreak> rows = new ArrayList<>();
-
-        try (PreparedStatement ps = connection.prepareStatement("SELECT * FROM streaks");
+        try (PreparedStatement ps = connection.prepareStatement("""
+            SELECT * FROM streaks
+            ORDER BY current_streak DESC, username COLLATE NOCASE ASC
+        """);
              ResultSet rs = ps.executeQuery()) {
 
             while (rs.next()) {
-                rows.add(new PlayerStreak(
-                        UUID.fromString(rs.getString("uuid")),
-                        rs.getString("username"),
-                        rs.getInt("current_streak"),
-                        rs.getInt("highest_streak"),
-                        normalizeEpochSeconds(readStoredLastClaim(rs)),
-                        rs.getInt("grace_used"),
-                        readStoredGraceCycleKey(rs)
-                ));
+                PlayerStreak row = readPlayerStreak(rs);
+
+                // Projection can only retain or decrease a stored current streak. Once later
+                // rows are below the worst retained projected score, they cannot qualify.
+                if (top.size() == LEADERBOARD_CACHE_SIZE && row.current < top.peek().current) {
+                    break;
+                }
+
+                try {
+                    int maxGracePerCycle = resolveMaxGracePerCycleBlocking(row.uuid, row.username);
+                    Projection projection = project(row, nowEpoch, maxGracePerCycle);
+                    if (projection.current() <= 0) {
+                        continue;
+                    }
+
+                    PlayerStreak projected = row.copy();
+                    projected.current = projection.current();
+                    projected.graceUsed = projection.graceUsed();
+                    projected.graceWeek = projection.graceCycle();
+                    offerTopCandidate(top, projected, CURRENT_LEADERBOARD_ORDER);
+                } catch (Exception ex) {
+                    plugin.getLogger().warning("Skipping leaderboard entry for " + row.username + ": " + ex.getMessage());
+                }
             }
         }
 
-        return rows;
+        return sortedTopCandidates(top, CURRENT_LEADERBOARD_ORDER);
+    }
+
+    private List<PlayerStreak> loadTopHighest() throws Exception {
+        ensureConnection();
+
+        try (PreparedStatement ps = connection.prepareStatement("""
+            SELECT * FROM streaks
+            ORDER BY highest_streak DESC, username COLLATE NOCASE ASC
+            LIMIT ?
+        """)) {
+            ps.setInt(1, LEADERBOARD_CACHE_SIZE);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                PriorityQueue<PlayerStreak> top = new PriorityQueue<>(LEADERBOARD_CACHE_SIZE, HIGHEST_LEADERBOARD_ORDER.reversed());
+                while (rs.next()) {
+                    offerTopCandidate(top, readPlayerStreak(rs), HIGHEST_LEADERBOARD_ORDER);
+                }
+                return sortedTopCandidates(top, HIGHEST_LEADERBOARD_ORDER);
+            }
+        }
+    }
+
+    private PlayerStreak readPlayerStreak(ResultSet rs) throws Exception {
+        return new PlayerStreak(
+                UUID.fromString(rs.getString("uuid")),
+                rs.getString("username"),
+                rs.getInt("current_streak"),
+                rs.getInt("highest_streak"),
+                normalizeEpochSeconds(readStoredLastClaim(rs)),
+                rs.getInt("grace_used"),
+                readStoredGraceCycleKey(rs)
+        );
+    }
+
+    static void offerTopCandidate(PriorityQueue<PlayerStreak> top,
+                                  PlayerStreak candidate,
+                                  Comparator<PlayerStreak> order) {
+        if (top.size() < LEADERBOARD_CACHE_SIZE) {
+            top.offer(candidate);
+            return;
+        }
+
+        if (order.compare(candidate, top.peek()) < 0) {
+            top.poll();
+            top.offer(candidate);
+        }
+    }
+
+    static List<PlayerStreak> sortedTopCandidates(PriorityQueue<PlayerStreak> top,
+                                                    Comparator<PlayerStreak> order) {
+        return top.stream().sorted(order).toList();
     }
 
     private List<PlayerStreak> copyLeaderboard(List<PlayerStreak> source, int limit) {

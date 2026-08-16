@@ -1,4 +1,4 @@
-package win.shamserver.streaks;
+package dev.shoam.streaks;
 
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;

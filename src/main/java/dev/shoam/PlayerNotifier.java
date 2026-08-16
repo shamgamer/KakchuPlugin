@@ -1,4 +1,4 @@
-package win.shamserver;
+package dev.shoam;
 
 import me.clip.placeholderapi.PlaceholderAPI;
 import net.kyori.adventure.text.Component;
@@ -12,8 +12,11 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.bukkit.plugin.java.JavaPlugin;
-import win.shamserver.streaks.LoginStreakManager;
+import dev.shoam.streaks.LoginStreakManager;
+
+import java.util.Locale;
 
 public final class PlayerNotifier {
 
@@ -37,7 +40,8 @@ public final class PlayerNotifier {
 
 class LoginRewardReminder implements Listener {
 
-    private static final String PERMISSION = "shamplugin.loginrewards";
+    private static final String NOTIFY_PERMISSION = "shamplugin.streaks.notify";
+    private static final String NOTIFY_PERMISSION_PREFIX = "shamplugin.streaks.notify.";
 
     private final JavaPlugin plugin;
     private final LoginStreakManager streakManager;
@@ -53,7 +57,7 @@ class LoginRewardReminder implements Listener {
         if (!plugin.getConfig().getBoolean("axrewards.login-reminder.enabled", true)) return;
 
         Player player = event.getPlayer();
-        if (!player.hasPermission(PERMISSION)) return;
+        if (!player.hasPermission(NOTIFY_PERMISSION)) return;
 
         if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")
                 || !Bukkit.getPluginManager().isPluginEnabled("AxRewards")) {
@@ -81,9 +85,11 @@ class LoginRewardReminder implements Listener {
                 return;
             }
 
-            if (count <= 0) return;
+            int unavailableRewards = resolveUnavailableRewardCount(player);
+            int availableCount = Math.max(0, count - unavailableRewards);
+            if (availableCount == 0) return;
 
-            String template = count == 1
+            String template = availableCount == 1
                     ? plugin.getConfig().getString("axrewards.login-reminder.message-single")
                     : plugin.getConfig().getString("axrewards.login-reminder.message-multiple");
 
@@ -101,7 +107,7 @@ class LoginRewardReminder implements Listener {
                         }
 
                         String rendered = template
-                                .replace("<count>", String.valueOf(count))
+                                .replace("<count>", String.valueOf(availableCount))
                                 .replace("<cmd>", command)
                                 .replace("<stk>", String.valueOf(currentStreak));
 
@@ -145,5 +151,39 @@ class LoginRewardReminder implements Listener {
         float pitch = (float) plugin.getConfig().getDouble("axrewards.login-reminder.sound.pitch", 1.0);
 
         player.playSound(player.getLocation(), sound, volume, pitch);
+    }
+
+    /**
+     * Returns the number of collectable rewards which should not trigger this
+     * reminder. When no numeric permission is granted, the default is zero so
+     * the reminder preserves its previous behavior.
+     */
+    private int resolveUnavailableRewardCount(Player player) {
+        int override = 0;
+
+        for (PermissionAttachmentInfo permissionInfo : player.getEffectivePermissions()) {
+            if (!permissionInfo.getValue()) {
+                continue;
+            }
+
+            String permission = permissionInfo.getPermission();
+
+            String normalized = permission.toLowerCase(Locale.ROOT);
+            if (!normalized.startsWith(NOTIFY_PERMISSION_PREFIX)) {
+                continue;
+            }
+
+            try {
+                int value = Integer.parseInt(normalized.substring(NOTIFY_PERMISSION_PREFIX.length()));
+                if (value >= 0) {
+                    // If several groups grant an override, use the most restrictive one.
+                    override = Math.max(override, value);
+                }
+            } catch (NumberFormatException ignored) {
+                // Ignore non-numeric permission suffixes such as wildcard nodes.
+            }
+        }
+
+        return override;
     }
 }

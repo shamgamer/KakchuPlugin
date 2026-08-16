@@ -4,13 +4,12 @@
                              http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>win.shamserver</groupId>
+    <groupId>dev.shoam</groupId>
     <artifactId>ShamPlugin</artifactId>
-    <version>26.2.0</version>
+    <version>26.3.0 RC 1</version>
     <packaging>jar</packaging>
-
     <name>shamplugin</name>
-    <url>https://shamserver.win</url>
+    <url>https://shoam.dev</url>
 
     <licenses>
         <license>
@@ -45,6 +44,13 @@
     </repositories>
 
     <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Paper API (provided by server) -->
         <dependency>
             <groupId>io.papermc.paper</groupId>
@@ -112,6 +118,12 @@
         </resources>
 
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.5</version>
+            </plugin>
+
             <!-- Compile with Java 21 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

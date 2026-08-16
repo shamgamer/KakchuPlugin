@@ -1,0 +1,26 @@
+# ShamPlugin 26.3.0 Draft 2
+
+## Breaking Changes
+
+* Renamed the Java package and project domain from `win.shamserver` to `dev.shoam` / `shoam.dev`.
+* Renamed `shamplugin.loginrewards` to `shamplugin.streaks.notify`. This permission now defaults to `true`.
+
+## Added
+
+* Added support for `dev` and `snapshot` prerelease versions.
+* Added support for versions prefixed with `v`, such as `v26.3.0`.
+* Added initial build tests to help reduce manual testing.
+* Added an optional `modify-last-claim` argument to `/sham streak set`:
+  `/sham streak set <player> <value> [true/false]`
+
+  When `true` (the default), the player’s last-claim time is updated.
+* Added `/sham debug versionsupport`.
+* Added compatibility checks at startup and through `/sham debug versionsupport`. That retrieves compatibility data from the project’s GitHub `versions.json` and reports whether the current Minecraft version is supported, known broken, or untested. The plugin also warns when the Minecraft version is no longer receiving ShamPlugin updates.
+* `/sham debug alerts` now displays the Discord webhook name, channel ID, and server (guild) ID.
+* Added `shamplugin.streaks.notify.<number>`, which subtracts unavailable rewards from the AxRewards reminder count. This is useful for excluding rank-gated rewards from reminders for players who cannot claim them.
+
+## Changed
+
+* Leaderboards now retain only the top entries in memory rather than loading the full leaderboard into memory.
+* Removed the old and obsolete `getBuildTime` function.
+* Other small improvements and changes.

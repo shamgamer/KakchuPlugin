@@ -1,4 +1,4 @@
-package win.shamserver.streaks;
+package dev.shoam.streaks;
 
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.model.user.User;

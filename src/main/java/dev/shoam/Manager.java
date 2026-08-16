@@ -1,11 +1,11 @@
-package win.shamserver;
+package dev.shoam;
 
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.plugin.java.JavaPlugin;
-import win.shamserver.streaks.LoginStreakManager;
-import win.shamserver.streaks.RewardCommand;
-import win.shamserver.streaks.StreakCommands;
+import dev.shoam.streaks.LoginStreakManager;
+import dev.shoam.streaks.RewardCommand;
+import dev.shoam.streaks.StreakCommands;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -45,17 +45,23 @@ public class Manager extends JavaPlugin {
         return alertsHandler != null;
     }
 
+    public Alerts getAlertsHandler() {
+        return alertsHandler;
+    }
+
     @Override
     public void onEnable() {
         instance = this;
 
         saveDefaultConfig();
 
+        new VersionSupportChecker(this).logStartupReport();
+
         if (getConfig().getBoolean("discord alerts.enabled", true)) {
             enableDiscordAlertsEarly();
         }
 
-        getLogger().info("✅ Sham Plugin enabled!");
+        //  getLogger().info("✅ Sham Plugin enabled!");
 
         if (getConfig().getBoolean("update-checker.enabled", true)) {
             try {

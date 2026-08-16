@@ -1,6 +1,7 @@
-package win.shamserver;
+package dev.shoam;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.Appender;
@@ -42,6 +43,7 @@ import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -173,6 +175,9 @@ public class Alerts extends Handler {
             if (level.isMoreSpecificThan(org.apache.logging.log4j.Level.INFO)) return INFO;
             return null;
         }
+    }
+
+    public record WebhookInfo(String channelId, String guildId, String name) {
     }
 
     private enum RenderMode {
@@ -373,6 +378,26 @@ public class Alerts extends Handler {
         this.senderExecutor.scheduleAtFixedRate(this::processQueueSafely, 0L, SENDER_INTERVAL_MS, TimeUnit.MILLISECONDS);
 
         installLog4jAppender();
+    }
+
+    public CompletableFuture<WebhookInfo> fetchWebhookInfo() {
+        URI metadataUri = URI.create(webhookUri.getScheme() + "://" + webhookUri.getAuthority() + webhookUri.getRawPath());
+        HttpRequest request = HttpRequest.newBuilder(metadataUri)
+                .GET()
+                .timeout(Duration.ofSeconds(10))
+                .build();
+        return http.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                .thenApply(response -> {
+                    if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                        throw new IllegalStateException("Discord webhook HTTP " + response.statusCode());
+                    }
+                    try {
+                        JsonNode webhook = JSON.readTree(response.body());
+                        return new WebhookInfo(webhook.path("channel_id").asText(), webhook.path("guild_id").asText(), webhook.path("name").asText());
+                    } catch (JsonProcessingException e) {
+                        throw new IllegalStateException("Invalid Discord webhook response", e);
+                    }
+                });
     }
 
     @Override

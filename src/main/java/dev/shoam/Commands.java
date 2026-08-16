@@ -1,4 +1,4 @@
-package win.shamserver;
+package dev.shoam;
 
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
@@ -7,16 +7,11 @@ import net.md_5.bungee.api.chat.hover.content.Text;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.jetbrains.annotations.NotNull;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.logging.Level;
 
 /**
  * Commands - compact /help output: places 2-5 commands per line depending on length
@@ -53,13 +48,14 @@ public class Commands implements CommandExecutor {
                     return true;
                 }
 
-                String url = String.valueOf(Manager.getInstance().getConfig().getString("map.url", "")).trim();
-                String header = String.valueOf(Manager.getInstance().getConfig().getString("map.header", "")).trim();
+                String url = Manager.getInstance().getConfig().getString("map.url", "").trim();
+                String header = Manager.getInstance().getConfig().getString("map.header", "").trim();
 
                 if (url.isBlank()) {
                     sendMessage(sender, "§cMap URL empty! Contact an admin to fix the config.");
                 } else if (url.equalsIgnoreCase("map.changeme.com")) {
                     sendMessage(sender,
+                            "Default map.changeme.com link detected",
                             "§eTo modify the map link go to:",
                             "§7plugins/ShamPlugin/config.yml",
                             "§7and look for §furl §7under §fmap",
@@ -307,18 +303,6 @@ public class Commands implements CommandExecutor {
         for (String msg : messages) {
             sender.sendMessage(msg);
         }
-    }
-
-    private String getBuildTime() {
-        try (InputStream stream = Manager.getInstance().getResource("plugin.yml")) {
-            if (stream != null) {
-                YamlConfiguration yaml = YamlConfiguration.loadConfiguration(new InputStreamReader(stream));
-                return yaml.getString("build-time", "unknown");
-            }
-        } catch (IOException e) {
-            Manager.getInstance().getLogger().log(Level.SEVERE, "Failed to load build time from plugin.yml", e);
-        }
-        return "unknown";
     }
 
     // Simple container for help entries

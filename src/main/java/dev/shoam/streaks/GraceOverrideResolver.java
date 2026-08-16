@@ -1,4 +1,4 @@
-package win.shamserver.streaks;
+package dev.shoam.streaks;
 
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;

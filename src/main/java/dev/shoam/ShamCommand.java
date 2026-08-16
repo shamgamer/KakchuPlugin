@@ -1,13 +1,14 @@
-package win.shamserver;
+package dev.shoam;
 
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.Bukkit;
 import org.bukkit.util.StringUtil;
 import org.jetbrains.annotations.NotNull;
-import win.shamserver.streaks.RewardCommand;
-import win.shamserver.streaks.StreakCommands;
+import dev.shoam.streaks.RewardCommand;
+import dev.shoam.streaks.StreakCommands;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -43,28 +44,28 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
         String branch = args[0].toLowerCase(Locale.ROOT);
         String[] remaining = Arrays.copyOfRange(args, 1, args.length);
 
-        if (branch.equals("uptime")) {
-            if (uptimeCommand == null) {
-                sender.sendMessage("§cUptime tracking is unavailable.");
-                return true;
+        switch (branch) {
+            case "uptime" -> {
+                if (uptimeCommand == null) {
+                    sender.sendMessage("§cUptime tracking is unavailable.");
+                    return true;
+                }
+                if (!sender.hasPermission("shamplugin.uptime")) {
+                    sender.sendMessage("§cYou do not have permission.");
+                    return true;
+                }
+                return uptimeCommand.handleCommand(sender, remaining);
             }
-            if (!sender.hasPermission("shamplugin.uptime")) {
-                sender.sendMessage("§cYou do not have permission.");
-                return true;
+            case "streak" -> {
+                if (streakCommands == null) {
+                    sender.sendMessage("§cLogin streaks are unavailable.");
+                    return true;
+                }
+                return handleStreakCommand(sender, remaining);
             }
-            return uptimeCommand.handleCommand(sender, remaining);
-        }
-
-        if (branch.equals("streak")) {
-            if (streakCommands == null) {
-                sender.sendMessage("§cLogin streaks are unavailable.");
-                return true;
+            case "debug" -> {
+                return handleDebugCommand(sender, remaining);
             }
-            return handleStreakCommand(sender, remaining);
-        }
-
-        if (branch.equals("debug")) {
-            return handleDebugCommand(sender, remaining);
         }
 
         sendRootUsage(sender);
@@ -124,12 +125,23 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
             sender.sendMessage("§cYou do not have permission.");
             return true;
         }
-        if (args.length != 1 || !args[0].equalsIgnoreCase("alerts")) {
-            sender.sendMessage("§cUsage: /sham debug alerts");
+        if (args.length != 1) {
+            sender.sendMessage("§cUsage: /sham debug <alerts|versionsupport>");
             return true;
         }
 
         Manager plugin = Manager.getInstance();
+        if (args[0].equalsIgnoreCase("versionsupport") || args[0].equalsIgnoreCase("versionsupportchecker")) {
+            sender.sendMessage("§7Running the version support check; detailed results are being written to the console.");
+            new VersionSupportChecker(plugin).logStartupReport(true);
+            return true;
+        }
+
+        if (!args[0].equalsIgnoreCase("alerts")) {
+            sender.sendMessage("§cUsage: /sham debug <alerts|versionsupport>");
+            return true;
+        }
+
         if (!plugin.getConfig().getBoolean("discord alerts.enabled", true)) {
             sender.sendMessage("§eDiscord alerts are disabled in config.yml.");
             return true;
@@ -145,10 +157,19 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
         plugin.getLogger().info("[Alerts Debug] INFO test log from /sham debug alerts");
         plugin.getLogger().warning("[Alerts Debug] WARN test log from /sham debug alerts");
         plugin.getLogger().log(Level.SEVERE, "[Alerts Debug] ERROR test log from /sham debug alerts");
-        plugin.getLogger().info("[Alerts Debug] " + status + ". Delivery is async; webhook HTTP failures will appear in console.");
 
-        sender.sendMessage("§aAlert debug logs emitted at INFO, WARN and ERROR.");
-        sender.sendMessage("§7" + status + ".");
+        Alerts alerts = plugin.getAlertsHandler();
+        if (alerts == null) {
+            sender.sendMessage("§7" + status + ".");
+            return true;
+        }
+
+        alerts.fetchWebhookInfo().whenComplete((info, throwable) -> Bukkit.getScheduler().runTask(plugin, () -> {
+            String webhookDetails = throwable == null
+                    ? ", webhook-name=" + info.name() + ", channel-id=" + info.channelId() + ", guild-id=" + info.guildId()
+                    : ", webhook-details=unavailable";
+            sender.sendMessage("§7" + status + webhookDetails + ".");
+        }));
         return true;
     }
 
@@ -178,7 +199,7 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
                 return Collections.emptyList();
             }
             if (args.length == 2) {
-                return StringUtil.copyPartialMatches(args[1], List.of("alerts"), new ArrayList<>());
+                return StringUtil.copyPartialMatches(args[1], List.of("alerts", "versionsupport"), new ArrayList<>());
             }
             return Collections.emptyList();
         }
@@ -220,6 +241,10 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
 
         if (args.length == 4 && action.equals("reward") && rewardCommand != null) {
             return rewardCommand.completeRewardTypes(args[3]);
+        }
+
+        if (args.length == 5 && action.equals("set")) {
+            return StringUtil.copyPartialMatches(args[4], List.of("true", "false"), new ArrayList<>());
         }
 
         return Collections.emptyList();
@@ -268,13 +293,14 @@ public class ShamCommand implements CommandExecutor, TabCompleter {
             sender.sendMessage("§e/sham streak get <player>");
         }
         if (streakCommands != null && hasAdminPermission(sender)) {
-            sender.sendMessage("§e/sham streak set <player> <value>");
+            sender.sendMessage("§e/sham streak set <player> <value> [modify-last-claim]");
             if (rewardCommand != null) {
                 sender.sendMessage("§e/sham streak reward <player> <type>");
             }
         }
         if (hasDebugPermission(sender)) {
             sender.sendMessage("§e/sham debug alerts");
+            sender.sendMessage("§e/sham debug versionsupport");
         }
     }
 }

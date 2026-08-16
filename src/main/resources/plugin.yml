@@ -3,7 +3,7 @@ version: ${project.version}
 website: https://modrinth.com/project/w6F3AvdX
 authors: ["shamgamer"]
 description: "Build Time: ${build.time}"
-main: win.shamserver.Manager
+main: dev.shoam.Manager
 api-version: 1.21
 softdepend:
   - PlaceholderAPI
@@ -62,9 +62,13 @@ permissions:
     description: Allows usage of /sham uptime command
     default: true
 
-  shamplugin.loginrewards:
-    description: Allows login reward reminder message
+  shamplugin.streaks.notify:
+    description: Allows login reward reminder messages. Set this node false to disable reminders, even when a numeric override is granted.
     default: true
+
+  shamplugin.streaks.notify.<number>:
+    description: Adjusts the reminder count (count - <number>); requires shamplugin.streaks.notify.
+    default: false
 
   shamplugin.streak:
     description: Allows usage of /streak, /sham streak, /streaktop and /higheststreaktop

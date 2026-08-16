@@ -104,7 +104,7 @@ axrewards:
   login-reminder:
     enabled: true # toggle for login rewards check
     delay-ticks: 300 # delay in ticks after a player joins before the message is sent
-    placeholder: "%axrewards_collectable%" # The placeholder it will check if it's larger than 1
+    placeholder: "%axrewards_collectable%" # The placeholder it will check for unclaimed rewards. shamplugin.streaks.notify.<number> is subtracted for unavailable rewards (default: .0).
     command: "/daily" # The command that will be activated when clicking, use <cmd> to put it in the message.
     # Text placeholders for messages <count> displays how many unclaimed the player has, <cmd> is command set above, <stk> is the streak from login-streaks.
     # !! for <stk> to work login-streaks: enabled must be true !!
@@ -130,7 +130,7 @@ axrewards:
     leaderboard_display_length: 10 # value from 1 to 100
     rewards:
       daily: # example of <list> placeholders
-        streak: true
+        streak: true # true to increment streak when the reward is claimed.
         bonuses: # what commands will be executed if the player has the amount of streaks when /sham streak reward is used
           3:
             commands: # executed server side %player% from axrewards placeholder

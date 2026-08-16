@@ -1,4 +1,4 @@
-package win.shamserver;
+package dev.shoam;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,8 +19,8 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 public final class UpdateChecker implements Runnable {
-    // Parses leading core versions like 2.5.6 or 3.0.0.1
-    private static final Pattern CORE_VERSION = Pattern.compile("^(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?(?:\\.(\\d+))?");
+    // Parses leading core versions like 2.5.6, v2.5.6, or 3.0.0.1
+    private static final Pattern CORE_VERSION = Pattern.compile("^v?(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?(?:\\.(\\d+))?", Pattern.CASE_INSENSITIVE);
 
     private final Manager plugin;
     private final HttpClient http;
@@ -90,6 +90,7 @@ public final class UpdateChecker implements Runnable {
             JsonNode latest = candidates.stream()
                     .max(Comparator.comparing(a -> a.path("date_published").asText("")))
                     .orElse(null);
+            //noinspection ConstantValue
             if (latest == null) {
                 plugin.clearUpdateAvailable();
                 return;
@@ -229,8 +230,8 @@ public final class UpdateChecker implements Runnable {
             int plus = v.indexOf('+');
             if (plus >= 0) v = v.substring(0, plus);
 
-            // Normalize "3.0.0B1" / "3.0.0beta1" / "3.0.0rc2" by inserting a dash
-            v = v.replaceFirst("^(\\d+(?:\\.\\d+){2})(?=[A-Za-z])", "$1-");
+            // Normalize "3.0.0B1" / "3.0.0beta1" / "v3.0.0rc2" by inserting a dash
+            v = v.replaceFirst("^v?(\\d+(?:\\.\\d+){2})(?=[A-Za-z])", "$1-");
 
             String[] parts = v.split("-", 2);
 
@@ -275,7 +276,7 @@ public final class UpdateChecker implements Runnable {
     }
 
     private static final class PreRelease implements Comparable<PreRelease> {
-        // rank: alpha(0) < beta(1) < rc(2) < unknown(3)
+        // rank: dev(0) < alpha(1) < beta(2) < rc(3) < unknown(4)
         final int rank;
         final int number;
         final String raw;
@@ -309,10 +310,11 @@ public final class UpdateChecker implements Runnable {
             }
 
             int rank = switch (label) {
-                case "a", "alpha" -> 0;
-                case "b", "beta" -> 1;
-                case "rc" -> 2;
-                default -> 3;
+                case "d", "dev", "development", "s", "snapshot" -> 0;
+                case "a", "alpha" -> 1;
+                case "b", "beta" -> 2;
+                case "rc", "release-candidate" -> 3;
+                default -> 4;
             };
 
             int n = 0;
@@ -334,7 +336,7 @@ public final class UpdateChecker implements Runnable {
 
         @Override
         public int compareTo(PreRelease o) {
-            // alpha < beta < rc < unknown
+            // dev < alpha < beta < rc < unknown
             int diff = Integer.compare(this.rank, o.rank);
             if (diff != 0) return diff;
 
